@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080808">
+<title>TAWFIQ AUTO PRO | Premium Vehicle Management</title>
+<meta name="description" content="سامانه حرفه‌ای مدیریت موترها، مصارف، عواید و حسابداری">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700;800&family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css?v=3">
+</head>
+<body>
+
+<!-- Cinematic intro -->
+<div id="intro" class="intro">
+  <div class="intro-lines"></div>
+  <div class="intro-content">
+    <div class="intro-emblem">T<span>.</span></div>
+    <div class="intro-overline">THE ART OF AUTOMOTIVE MANAGEMENT</div>
+    <div class="intro-name">TAWFIQ <span>AUTO PRO</span></div>
+    <div class="intro-rule"><i></i></div>
+    <p data-i18n="introText">قدرت در حرکت، دقت در مدیریت</p>
+    <button id="enterSite" class="intro-enter">
+      <span data-i18n="enter">ورود به تجربه لوکس</span><b>↗</b>
+    </button>
+    <div class="intro-foot">EST. 2026 <span>•</span> PREMIUM EXPERIENCE</div>
+  </div>
+  <button id="skipIntro" class="skip-intro" data-i18n="skip">رد شدن ←</button>
+</div>
+
+<!-- Background video -->
+<div class="video-background">
+  <video id="heroVideo" autoplay muted loop playsinline preload="metadata"
+    poster="https://images.unsplash.com/photo-1503376780353-7e6692767b70?auto=format&fit=crop&w=2000&q=85">
+    <source src="https://videos.pexels.com/video-files/3129671/3129671-hd_1920_1080_25fps.mp4" type="video/mp4">
+  </video>
+</div>
+<div class="cinematic-shade"></div>
+<div class="gold-glow"></div>
+<div class="film-grain"></div>
+
+<header class="topbar">
+  <a class="brand" href="/" aria-label="TAWFIQ AUTO PRO">
+    <span class="brand-mark">T<span>.</span></span>
+    <span class="brand-name">TAWFIQ <b>AUTO PRO</b><small>PREMIUM VEHICLE MANAGEMENT</small></span>
+  </a>
+
+  <nav class="nav-links">
+    <a href="#home" data-i18n="navHome">خانه</a>
+    <a href="#features" data-i18n="navFeatures">امکانات</a>
+    <a href="#about" data-i18n="navAbout">درباره سیستم</a>
+  </nav>
+
+  <div class="top-actions">
+    <div class="language-wrap">
+      <button id="languageButton" class="language-button" aria-expanded="false">
+        <span class="language-symbol">◎</span><span id="currentLanguage">دری</span><span class="language-arrow">⌄</span>
+      </button>
+      <div id="languageMenu" class="language-menu">
+        <button data-lang="fa">فارسی</button>
+        <button data-lang="prs">دری</button>
+        <button data-lang="en">English</button>
+      </div>
+    </div>
+    <a class="top-login" href="/login"><span data-i18n="login">ورود</span><b>↗</b></a>
+  </div>
+</header>
+
+<main>
+  <section class="hero" id="home">
+    <div class="hero-content">
+      <div class="eyebrow"><span></span><b data-i18n="eyebrow">فراتر از مدیریت معمولی</b><span></span></div>
+      <div class="hero-kicker">DRIVE YOUR BUSINESS FORWARD</div>
+      <h1 data-i18n-html="headline">هر موتر،<br><em>یک حساب دقیق.</em></h1>
+      <p class="hero-en">YOUR VEHICLES. YOUR BUSINESS. YOUR CONTROL.</p>
+      <p class="hero-description" data-i18n="description">
+        موترها، مصارف، عواید و گزارش‌های خود را در یک فضای خصوصی، منظم و حرفه‌ای مدیریت کنید.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-gold" href="/register"><span data-i18n="register">ساخت حساب کاربری</span><b>↗</b></a>
+        <a class="btn btn-glass" href="#features"><span data-i18n="discover">کشف امکانات</span><b>↓</b></a>
+      </div>
+      <div class="trust-line"><span class="trust-icon">◇</span><span data-i18n="privacy">حساب اختصاصی · مدیریت آسان · اطلاعات خصوصی</span></div>
+    </div>
+
+    <aside class="hero-side">
+      <div class="side-top"><span class="side-dot"></span> TAWFIQ AUTOMOTIVE</div>
+      <div class="side-number">01 <span>/ 04</span></div>
+      <div class="side-title">DESIGNED<br>FOR <strong>EXCELLENCE</strong></div>
+      <div class="side-description" data-i18n="sideText">تجربه‌ای متفاوت برای مدیریت هوشمند موترهای شما.</div>
+      <div class="side-bottom"><span>PRECISION</span><span>•</span><span>PERFORMANCE</span></div>
+    </aside>
+
+    <div class="hero-bottom">
+      <div class="bottom-label"><span class="bottom-line"></span><span data-i18n="scroll">برای کشف امکانات پایین بروید</span></div>
+      <div class="bottom-coordinate">34°31' N&nbsp;&nbsp; 69°09' E</div>
+    </div>
+  </section>
+
+  <section class="features" id="features">
+    <div class="section-heading">
+      <div class="section-kicker">A NEW STANDARD</div>
+      <h2 data-i18n-html="featureHeading">مدیریت دقیق؛<em> انتخاب هوشمندانه</em></h2>
+      <p data-i18n="featureDescription">ابزارهای ضروری برای کنترل بهتر موترها و حساب‌وکتاب شما.</p>
+    </div>
+
+    <div class="feature-grid">
+      <article class="feature-card"><div class="feature-top"><span>01 / VEHICLES</span><b>↗</b></div><div class="feature-icon">◇</div><h3 data-i18n="f1title">مدیریت موترها</h3><p data-i18n="f1desc">مشخصات موترها را ثبت کنید و همه اطلاعات را منظم نگه دارید.</p><div class="card-line"></div></article>
+      <article class="feature-card"><div class="feature-top"><span>02 / EXPENSES</span><b>↗</b></div><div class="feature-icon">⌁</div><h3 data-i18n="f2title">ثبت مصارف</h3><p data-i18n="f2desc">مصارف ترمیم، تیل و دیگر هزینه‌ها را به‌صورت دقیق ثبت کنید.</p><div class="card-line"></div></article>
+      <article class="feature-card"><div class="feature-top"><span>03 / FINANCE</span><b>↗</b></div><div class="feature-icon">₳</div><h3 data-i18n="f3title">عواید و حسابداری</h3><p data-i18n="f3desc">عواید و مصارف را بررسی کنید و گزارش‌های روشن داشته باشید.</p><div class="card-line"></div></article>
+      <article class="feature-card"><div class="feature-top"><span>04 / PRIVACY</span><b>↗</b></div><div class="feature-icon">⬡</div><h3 data-i18n="f4title">حساب خصوصی</h3><p data-i18n="f4desc">اطلاعات هر کاربر در فضای اختصاصی خودش مدیریت می‌شود.</p><div class="card-line"></div></article>
+    </div>
+  </section>
+
+  <section class="closing" id="about">
+    <div class="closing-overline">TAWFIQ AUTO PRO</div>
+    <h2 data-i18n-html="closingHeading">کنترل بیشتر.<br><em>تصمیم‌های بهتر.</em></h2>
+    <p data-i18n="closingText">یک راه ساده و حرفه‌ای برای مدیریت موترها و حساب‌وکتاب.</p>
+    <a class="btn btn-gold" href="/register"><span data-i18n="startNow">به‌زودی همراه ما شوید</span><b>↗</b></a>
+  </section>
+</main>
+
+<footer class="footer">
+  <a class="footer-brand" href="/">TAWFIQ <span>AUTO PRO</span></a>
+  <p data-i18n="footerText">قدرت در حرکت، دقت در مدیریت.</p>
+  <span class="copyright">© 2026 TAWFIQ AUTO PRO</span>
+</footer>
+
+<script src="/static/js/main.js?v=3"></script>
+</body>
+</html>
