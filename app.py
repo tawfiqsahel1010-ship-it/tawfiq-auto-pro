@@ -1,6 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 import sqlite3
 import os
 import sys
@@ -121,6 +121,21 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_notifications_user
             ON notifications(user_id);
         """)
+
+        # Safely migrate older databases without deleting existing records.
+        vehicle_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(vehicles)").fetchall()
+        }
+
+        if "purchase_price" not in vehicle_columns:
+            conn.execute(
+                "ALTER TABLE vehicles ADD COLUMN purchase_price REAL NOT NULL DEFAULT 0"
+            )
+
+        if "sale_price" not in vehicle_columns:
+            conn.execute(
+                "ALTER TABLE vehicles ADD COLUMN sale_price REAL NOT NULL DEFAULT 0"
+            )
 
 
 def hash_password(password):
@@ -582,6 +597,15 @@ async def dashboard(request: Request):
                COALESCE(SUM(CASE WHEN transaction_type='expense' THEN amount ELSE 0 END),0) expense
                FROM transactions WHERE user_id=?""", (user["id"],)
         ).fetchone()
+        vehicle_totals = conn.execute(
+            """SELECT
+                 COALESCE(SUM(v.purchase_price),0) purchase_total,
+                 COALESCE(SUM(v.sale_price),0) sale_total,
+                 COALESCE(SUM((SELECT SUM(e.amount) FROM vehicle_expenses e
+                    WHERE e.vehicle_id=v.id AND e.user_id=v.user_id)),0) vehicle_expenses
+               FROM vehicles v WHERE v.user_id=?""",
+            (user["id"],)
+        ).fetchone()
         recent = conn.execute(
             """SELECT * FROM transactions WHERE user_id=?
                ORDER BY transaction_date DESC, id DESC LIMIT 5""",
@@ -608,7 +632,10 @@ async def dashboard(request: Request):
       <div class="card"><div>تعداد موترها</div><div class="stat">{vehicles}</div><a href="/vehicles">مدیریت موترها ←</a></div>
       <div class="card"><div>مجموع عواید</div><div class="stat">{money(totals['income'])}</div><div>افغانی</div></div>
       <div class="card"><div>مجموع مصارف</div><div class="stat">{money(totals['expense'])}</div><div>افغانی</div></div>
-      <div class="card"><div>بیلانس</div><div class="stat">{money(totals['income']-totals['expense'])}</div><div>افغانی</div></div>
+      <div class="card"><div>بیلانس معاملات</div><div class="stat">{money(totals['income']-totals['expense'])}</div><div>افغانی</div></div>
+      <div class="card"><div>مجموع قیمت خرید موترها</div><div class="stat">{money(vehicle_totals['purchase_total'])}</div><div>افغانی</div></div>
+      <div class="card"><div>مجموع قیمت فروش ثبت‌شده</div><div class="stat">{money(vehicle_totals['sale_total'])}</div><div>افغانی</div></div>
+      <div class="card"><div>مصارف مستقیم موترها</div><div class="stat">{money(vehicle_totals['vehicle_expenses'])}</div><div>افغانی</div></div>
     </div>
     <div class="grid">
       <a class="card" href="/vehicles"><h3>🚘 موترهای من</h3><p>ثبت و مدیریت موترها</p></a>
@@ -666,6 +693,8 @@ async def vehicles_page(request: Request):
             <div class="vehicle-specs">
               <div><small>سال ساخت</small><strong>{year}</strong></div>
               <div><small>رنگ</small><strong>{color}</strong></div>
+              <div><small>قیمت خرید</small><strong>{money(v['purchase_price'] or 0)} افغانی</strong></div>
+              <div><small>قیمت فروش</small><strong>{money(v['sale_price'] or 0)} افغانی</strong></div>
             </div>
             <details class="vehicle-details">
               <summary>مشاهده مشخصات کامل</summary>
@@ -724,6 +753,8 @@ async def vehicles_page(request: Request):
           <div><label>رنگ</label><input name="color" maxlength="50"></div>
           <div><label>نمبر شاسی</label><input name="chassis_number" maxlength="100"></div>
           <div><label>نمبر انجن</label><input name="engine_number" maxlength="100"></div>
+          <div><label>قیمت خرید (افغانی)</label><input name="purchase_price" type="number" min="0" step="0.01" value="0"></div>
+          <div><label>قیمت فروش (افغانی، پس از فروش)</label><input name="sale_price" type="number" min="0" step="0.01" value="0"></div>
         </div>
         <label>یادداشت</label>
         <textarea name="notes" maxlength="2000"></textarea>
@@ -774,7 +805,9 @@ async def vehicle_create(
     color: str = Form(""),
     chassis_number: str = Form(""),
     engine_number: str = Form(""),
-    notes: str = Form("")
+    notes: str = Form(""),
+    purchase_price: float = Form(0),
+    sale_price: float = Form(0)
 ):
     user = current_user(request)
     if not user:
@@ -785,15 +818,21 @@ async def vehicle_create(
             raise ValueError()
     except ValueError:
         return HTMLResponse(page("خطا", "<p>سال ساخت معتبر نیست.</p><a href='/vehicles'>بازگشت</a>", user), status_code=400)
+    try:
+        if purchase_price < 0 or sale_price < 0 or purchase_price > 1_000_000_000_000 or sale_price > 1_000_000_000_000:
+            raise ValueError()
+    except (ValueError, TypeError):
+        return HTMLResponse(page("خطا", "<p>قیمت خرید یا فروش معتبر نیست.</p><a href='/vehicles'>بازگشت</a>", user), status_code=400)
+
     with get_db() as conn:
         conn.execute(
             """INSERT INTO vehicles
             (user_id, plate_number, brand, model, manufacture_year, color,
-             chassis_number, engine_number, notes)
-            VALUES(?,?,?,?,?,?,?,?,?)""",
+             chassis_number, engine_number, notes, purchase_price, sale_price)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
             (user["id"], plate_number.strip(), brand.strip(), model.strip(),
              year, color.strip(), chassis_number.strip(),
-             engine_number.strip(), notes.strip())
+             engine_number.strip(), notes.strip(), purchase_price, sale_price)
         )
     audit(user["id"], "vehicle_create", brand + " " + model)
     return RedirectResponse("/vehicles", status_code=303)
@@ -845,6 +884,10 @@ async def vehicle_expenses_page(request: Request, vehicle_id: int):
 
     title = esc((vehicle["brand"] or "") + " " + (vehicle["model"] or ""))
     plate = esc(vehicle["plate_number"] or "ثبت نشده")
+    purchase_price = float(vehicle["purchase_price"] or 0)
+    sale_price = float(vehicle["sale_price"] or 0)
+    total_expenses = float(summary["total"] or 0)
+    net_profit = sale_price - purchase_price - total_expenses
     rows = ""
     for e in expenses:
         rows += f"""
@@ -877,6 +920,12 @@ async def vehicle_expenses_page(request: Request, vehicle_id: int):
         </div>
         <div class="card"><div>تعداد مصارف</div>
           <div class="stat">{summary['n']}</div>
+        </div>
+        <div class="card"><div>قیمت خرید</div><div class="stat">{money(purchase_price)}</div><div>افغانی</div></div>
+        <div class="card"><div>قیمت فروش ثبت‌شده</div><div class="stat">{money(sale_price)}</div><div>افغانی</div></div>
+        <div class="card"><div>سود/زیان محاسباتی</div>
+          <div class="stat">{money(net_profit) if sale_price > 0 else 'فروخته نشده'}</div>
+          <div>{'افغانی' if sale_price > 0 else 'پس از ثبت قیمت فروش محاسبه می‌شود'}</div>
         </div>
       </div>
     </div>
