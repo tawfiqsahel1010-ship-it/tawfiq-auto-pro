@@ -41,30 +41,322 @@ for folder in (DATA_DIR, STATIC_DIR, TEMPLATES_DIR):
     folder.mkdir(parents=True, exist_ok=True)
 
 
+
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+
+class CompatRow(dict):
+    """PostgreSQL row compatible with SQLite named and numeric indexing."""
+    def __init__(self, names, values):
+        super().__init__(zip(names, values))
+        self._values = tuple(values)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._values[key]
+        return super().__getitem__(key)
+
+
+class CompatCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+    def _row(self, values):
+        if values is None:
+            return None
+        names = [col[0] for col in (self._cursor.description or [])]
+        return CompatRow(names, values)
+
+    def fetchone(self):
+        return self._row(self._cursor.fetchone())
+
+    def fetchall(self):
+        return [self._row(row) for row in self._cursor.fetchall()]
+
+
+class PostgresConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def execute(self, sql, params=()):
+        # The existing application uses SQLite's ? placeholders.
+        sql = sql.replace("?", "%s")
+        cursor = self._connection.cursor()
+        cursor.execute(sql, tuple(params or ()))
+        return CompatCursor(cursor)
+
+    def executescript(self, script):
+        # Schema statements here contain no semicolons inside string literals.
+        for statement in script.split(";"):
+            statement = statement.strip()
+            if statement:
+                self.execute(statement)
+
+    def commit(self):
+        self._connection.commit()
+
+    def rollback(self):
+        self._connection.rollback()
+
+    def close(self):
+        self._connection.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None:
+                self.commit()
+            else:
+                self.rollback()
+        finally:
+            self.close()
+        return False
+
+
 def get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=20)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    if not DATABASE_URL:
+        conn = sqlite3.connect(DB_PATH, timeout=20)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    from urllib.parse import urlparse, unquote
+    import ssl
+    import pg8000.dbapi
+
+    parsed = urlparse(DATABASE_URL)
+    if parsed.scheme not in ("postgres", "postgresql"):
+        raise RuntimeError("DATABASE_URL must be a PostgreSQL connection URL.")
+
+    connection = pg8000.dbapi.connect(
+        user=unquote(parsed.username or ""),
+        password=unquote(parsed.password or ""),
+        host=parsed.hostname,
+        port=parsed.port or 5432,
+        database=unquote(parsed.path.lstrip("/")) or "postgres",
+        ssl_context=ssl.create_default_context(),
+        timeout=20,
+    )
+    return PostgresConnection(connection)
+
+
+
+CURRENCIES = {
+    "AFN": ("افغانی", 1.0), "USD": ("دالر", 70.0),
+    "EUR": ("یورو", 76.0), "PKR": ("کلدار پاکستانی", 0.25),
+    "IRR": ("ریال ایرانی", 0.0016), "GBP": ("پوند", 90.0),
+    "SAR": ("ریال سعودی", 18.66), "AED": ("درهم امارات", 19.05),
+    "CNY": ("یوان چین", 9.7), "TRY": ("لیره ترکیه", 2.0)
+}
+
+def ensure_currency_tables():
+    with get_db() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS currency_rates (
+            currency TEXT PRIMARY KEY,
+            rate_to_afn REAL NOT NULL CHECK(rate_to_afn > 0),
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )""")
+        for code, (_, rate) in CURRENCIES.items():
+            conn.execute(
+                "INSERT INTO currency_rates(currency, rate_to_afn) VALUES(?, ?) ON CONFLICT(currency) DO NOTHING",
+                (code, rate)
+            )
+
+def to_afn(amount, currency="AFN", rates=None):
+    rates = rates if rates is not None else get_currency_rates()
+    code = str(currency or "AFN").upper()
+    if code not in CURRENCIES:
+        code = "AFN"
+    return float(amount or 0) * float(rates.get(code, 1.0))
+
+
+def get_currency_rates():
+    ensure_currency_tables()
+    with get_db() as conn:
+        rows = conn.execute("SELECT currency, rate_to_afn FROM currency_rates").fetchall()
+    return {r["currency"]: float(r["rate_to_afn"]) for r in rows}
+
+def currency_options():
+    return "".join(f'<option value="{c}">{c} — {n}</option>' for c, (n, _) in CURRENCIES.items())
+
+@app.get("/owner/currencies", response_class=HTMLResponse)
+async def owner_currencies_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    if user["role"] != "owner":
+        return HTMLResponse(page("دسترسی ممنوع", "<p>فقط مالک اجازه دارد.</p>", user), status_code=403)
+    rates = get_currency_rates()
+    rows = "".join(
+        f'<tr><td>{c}</td><td>{n}</td><td><input name="{c}" type="number" min="0.00000001" step="any" value="{rates.get(c, rate)}" required></td></tr>'
+        for c, (n, rate) in CURRENCIES.items()
+    )
+    body = f"""<div class="card"><h2>مدیریت نرخ ارز</h2>
+    <p>نرخ هر واحد ارز به افغانی است. نرخ‌های اولیه نمونه‌اند؛ پیش از استفاده اصلاح‌شان کن.</p>
+    <form method="post" action="/owner/currencies"><table>
+    <tr><th>کد</th><th>ارز</th><th>معادل افغانی</th></tr>{rows}</table>
+    <button type="submit">ذخیره نرخ‌ها</button></form>
+    <p><a href="/owner">بازگشت به پنل مالک</a></p></div>"""
+    return HTMLResponse(page("مدیریت نرخ ارز", body, user))
+
+@app.post("/owner/currencies")
+async def owner_currencies_save(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    if user["role"] != "owner":
+        return HTMLResponse(page("دسترسی ممنوع", "<p>فقط مالک اجازه دارد.</p>", user), status_code=403)
+    form = await request.form()
+    try:
+        values = {c: float(form.get(c, "")) for c in CURRENCIES}
+        if any(not (0 < v < 1e12) for v in values.values()):
+            raise ValueError()
+    except (ValueError, TypeError):
+        return HTMLResponse(page("خطا", "<p>نرخ‌ها باید عدد مثبت باشند.</p>", user), status_code=400)
+    ensure_currency_tables()
+    with get_db() as conn:
+        for c, rate in values.items():
+            conn.execute("UPDATE currency_rates SET rate_to_afn=?, updated_at=CURRENT_TIMESTAMP WHERE currency=?", (rate, c))
+    return RedirectResponse("/owner/currencies", status_code=303)
 
 
 def init_db():
+    if not DATABASE_URL:
+        with get_db() as conn:
+            conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                full_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user'
+                    CHECK (role IN ('owner', 'user')),
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS vehicles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                plate_number TEXT,
+                brand TEXT NOT NULL,
+                model TEXT NOT NULL,
+                manufacture_year INTEGER,
+                color TEXT,
+                chassis_number TEXT,
+                engine_number TEXT,
+                notes TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                purchase_price REAL NOT NULL DEFAULT 0,
+                sale_price REAL NOT NULL DEFAULT 0,
+                photo_path TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS vehicle_expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                vehicle_id INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                amount REAL NOT NULL CHECK (amount >= 0),
+                currency TEXT NOT NULL DEFAULT 'AFN',
+                description TEXT,
+                expense_date TEXT NOT NULL DEFAULT CURRENT_DATE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                vehicle_id INTEGER,
+                transaction_type TEXT NOT NULL
+                    CHECK (transaction_type IN ('income', 'expense')),
+                category TEXT NOT NULL,
+                amount REAL NOT NULL CHECK (amount >= 0),
+                currency TEXT NOT NULL DEFAULT 'AFN',
+                description TEXT,
+                transaction_date TEXT NOT NULL DEFAULT CURRENT_DATE,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE SET NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                title TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                action TEXT NOT NULL,
+                details TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_vehicles_user
+                ON vehicles(user_id);
+            CREATE INDEX IF NOT EXISTS idx_expenses_user_vehicle
+                ON vehicle_expenses(user_id, vehicle_id);
+            CREATE INDEX IF NOT EXISTS idx_transactions_user_date
+                ON transactions(user_id, transaction_date);
+            CREATE INDEX IF NOT EXISTS idx_notifications_user
+                ON notifications(user_id);
+            """)
+
+            vehicle_columns = {
+                row[1] for row in
+                conn.execute("PRAGMA table_info(vehicles)").fetchall()
+            }
+            if "purchase_price" not in vehicle_columns:
+                conn.execute(
+                    "ALTER TABLE vehicles ADD COLUMN purchase_price REAL NOT NULL DEFAULT 0"
+                )
+            if "sale_price" not in vehicle_columns:
+                conn.execute(
+                    "ALTER TABLE vehicles ADD COLUMN sale_price REAL NOT NULL DEFAULT 0"
+                )
+            if "photo_path" not in vehicle_columns:
+                conn.execute(
+                    "ALTER TABLE vehicles ADD COLUMN photo_path TEXT"
+                )
+        return
+
+    # Render/Supabase PostgreSQL schema.
     with get_db() as conn:
         conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
             full_name TEXT NOT NULL,
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'user'
                 CHECK (role IN ('owner', 'user')),
             is_active INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
         );
 
         CREATE TABLE IF NOT EXISTS vehicles (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             plate_number TEXT,
             brand TEXT NOT NULL,
             model TEXT NOT NULL,
@@ -73,85 +365,103 @@ def init_db():
             chassis_number TEXT,
             engine_number TEXT,
             notes TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+            updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text),
+            purchase_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+            sale_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+            photo_path TEXT,
+            purchase_currency TEXT NOT NULL DEFAULT 'AFN',
+            sale_currency TEXT NOT NULL DEFAULT 'AFN'
         );
 
         CREATE TABLE IF NOT EXISTS vehicle_expenses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            vehicle_id INTEGER NOT NULL,
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            vehicle_id BIGINT NOT NULL REFERENCES vehicles(id) ON DELETE CASCADE,
             category TEXT NOT NULL,
-            amount REAL NOT NULL CHECK (amount >= 0),
+            amount DOUBLE PRECISION NOT NULL CHECK (amount >= 0),
             currency TEXT NOT NULL DEFAULT 'AFN',
             description TEXT,
-            expense_date TEXT NOT NULL DEFAULT CURRENT_DATE,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE
+            expense_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
         );
 
         CREATE TABLE IF NOT EXISTS transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            vehicle_id INTEGER,
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            vehicle_id BIGINT REFERENCES vehicles(id) ON DELETE SET NULL,
             transaction_type TEXT NOT NULL
                 CHECK (transaction_type IN ('income', 'expense')),
             category TEXT NOT NULL,
-            amount REAL NOT NULL CHECK (amount >= 0),
+            amount DOUBLE PRECISION NOT NULL CHECK (amount >= 0),
             currency TEXT NOT NULL DEFAULT 'AFN',
             description TEXT,
-            transaction_date TEXT NOT NULL DEFAULT CURRENT_DATE,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (vehicle_id) REFERENCES vehicles(id) ON DELETE SET NULL
+            transaction_date TEXT NOT NULL DEFAULT (CURRENT_DATE::text),
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
         );
 
         CREATE TABLE IF NOT EXISTS notifications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
             title TEXT NOT NULL,
             message TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
         );
 
         CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
             action TEXT NOT NULL,
             details TEXT,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+            created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP::text)
         );
 
-        CREATE INDEX IF NOT EXISTS idx_vehicles_user ON vehicles(user_id);
+        CREATE INDEX IF NOT EXISTS idx_vehicles_user
+            ON vehicles(user_id);
         CREATE INDEX IF NOT EXISTS idx_expenses_user_vehicle
             ON vehicle_expenses(user_id, vehicle_id);
         CREATE INDEX IF NOT EXISTS idx_transactions_user_date
             ON transactions(user_id, transaction_date);
         CREATE INDEX IF NOT EXISTS idx_notifications_user
             ON notifications(user_id);
+
+        ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS purchase_price
+            DOUBLE PRECISION NOT NULL DEFAULT 0;
+        ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS sale_price
+            DOUBLE PRECISION NOT NULL DEFAULT 0;
+        ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS photo_path TEXT;
         """)
 
-        # Safely migrate older databases without deleting existing records.
-        vehicle_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(vehicles)").fetchall()
-        }
 
-        if "purchase_price" not in vehicle_columns:
+
+def ensure_vehicle_currency_columns():
+    with get_db() as conn:
+        if DATABASE_URL:
             conn.execute(
-                "ALTER TABLE vehicles ADD COLUMN purchase_price REAL NOT NULL DEFAULT 0"
+                "ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS "
+                "purchase_currency TEXT NOT NULL DEFAULT 'AFN'"
             )
-
-        if "sale_price" not in vehicle_columns:
             conn.execute(
-                "ALTER TABLE vehicles ADD COLUMN sale_price REAL NOT NULL DEFAULT 0"
+                "ALTER TABLE vehicles ADD COLUMN IF NOT EXISTS "
+                "sale_currency TEXT NOT NULL DEFAULT 'AFN'"
             )
-        if "photo_path" not in vehicle_columns:
-            conn.execute("ALTER TABLE vehicles ADD COLUMN photo_path TEXT")
-
+        else:
+            columns = {
+                row["name"]
+                for row in conn.execute(
+                    "PRAGMA table_info(vehicles)"
+                ).fetchall()
+            }
+            if "purchase_currency" not in columns:
+                conn.execute(
+                    "ALTER TABLE vehicles ADD COLUMN "
+                    "purchase_currency TEXT NOT NULL DEFAULT 'AFN'"
+                )
+            if "sale_currency" not in columns:
+                conn.execute(
+                    "ALTER TABLE vehicles ADD COLUMN "
+                    "sale_currency TEXT NOT NULL DEFAULT 'AFN'"
+                )
 
 def hash_password(password):
     salt = secrets.token_bytes(16)
@@ -532,7 +842,7 @@ async def register(
         request.session["user_id"] = uid
         audit(uid, "register", "New user registered")
         return RedirectResponse("/dashboard", status_code=303)
-    except sqlite3.IntegrityError:
+    except (sqlite3.IntegrityError, __import__('pg8000.dbapi', fromlist=['IntegrityError']).IntegrityError):
         return HTMLResponse(page("ثبت‌نام", "<div class='card'><h2>این حساب از قبل وجود دارد</h2><p>قبلاً با این نام کاربری حساب ساخته‌ای. لازم نیست حساب دیگری بسازی؛ وارد حساب قبلی خودت شو.</p><a class='button' href='/login'>ورود به حساب قبلی</a><p class='small'>برای ورود، همان نام کاربری و رمز عبوری را وارد کن که هنگام ثبت‌نام ساخته بودی.</p><p><a href='/register'>بازگشت به ثبت‌نام</a></p></div>"), status_code=409)
 
 
@@ -768,8 +1078,22 @@ async def vehicles_page(request: Request):
           <div><label>رنگ</label><input name="color" maxlength="50"></div>
           <div><label>نمبر شاسی</label><input name="chassis_number" maxlength="100"></div>
           <div><label>نمبر انجن</label><input name="engine_number" maxlength="100"></div>
-          <div><label>قیمت خرید (افغانی)</label><input name="purchase_price" type="number" min="0" step="0.01" value="0"></div>
-          <div><label>قیمت فروش (افغانی، پس از فروش)</label><input name="sale_price" type="number" min="0" step="0.01" value="0"></div>
+          <div><label>قیمت خرید</label><input name="purchase_price" type="number" min="0" step="0.01" value="0">
+          <select name="purchase_currency">
+            <option value="AFN">افغانی AFN</option><option value="USD">دالر USD</option>
+            <option value="EUR">یورو EUR</option><option value="PKR">روپیه پاکستان PKR</option>
+            <option value="IRR">ریال ایران IRR</option><option value="GBP">پوند GBP</option>
+            <option value="SAR">ریال سعودی SAR</option><option value="AED">درهم امارات AED</option>
+            <option value="CNY">یوان چین CNY</option><option value="TRY">لیر ترکیه TRY</option>
+          </select></div>
+          <div><label>قیمت فروش</label><input name="sale_price" type="number" min="0" step="0.01" value="0">
+          <select name="sale_currency">
+            <option value="AFN">افغانی AFN</option><option value="USD">دالر USD</option>
+            <option value="EUR">یورو EUR</option><option value="PKR">روپیه پاکستان PKR</option>
+            <option value="IRR">ریال ایران IRR</option><option value="GBP">پوند GBP</option>
+            <option value="SAR">ریال سعودی SAR</option><option value="AED">درهم امارات AED</option>
+            <option value="CNY">یوان چین CNY</option><option value="TRY">لیر ترکیه TRY</option>
+          </select></div>
         </div>
         <label>عکس موتر (اختیاری، حداکثر ۵ مگابایت)</label>
         <input type="file" name="photo" accept="image/jpeg,image/png,image/webp">
@@ -826,11 +1150,23 @@ async def vehicle_create(
     notes: str = Form(""),
     purchase_price: float = Form(0),
     sale_price: float = Form(0),
+    purchase_currency: str = Form("AFN"),
+    sale_currency: str = Form("AFN"),
     photo: UploadFile | None = File(None),
 ):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
+
+    allowed_currencies = {
+        "AFN", "USD", "EUR", "PKR", "IRR",
+        "GBP", "SAR", "AED", "CNY", "TRY",
+    }
+    if purchase_currency not in allowed_currencies or sale_currency not in allowed_currencies:
+        return HTMLResponse(
+            page("خطا", "<p>واحد پول انتخاب‌شده معتبر نیست.</p><a href='/vehicles'>بازگشت</a>", user),
+            status_code=400,
+        )
 
     brand = brand.strip()
     model = model.strip()
@@ -912,12 +1248,14 @@ async def vehicle_create(
             conn.execute(
                 """INSERT INTO vehicles
                 (user_id, plate_number, brand, model, manufacture_year, color,
-                 chassis_number, engine_number, notes, purchase_price, sale_price, photo_path)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 chassis_number, engine_number, notes, purchase_price, sale_price, photo_path,
+                 purchase_currency, sale_currency)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     user["id"], plate_number.strip(), brand, model, year,
                     color.strip(), chassis_number.strip(), engine_number.strip(),
                     notes.strip(), purchase_price, sale_price, photo_name,
+                    purchase_currency, sale_currency,
                 ),
             )
         audit(user["id"], "vehicle_create", brand + " " + model)
@@ -1034,16 +1372,27 @@ async def vehicle_expenses_page(request: Request, vehicle_id: int):
             (vehicle_id, user["id"])
         ).fetchall()
         summary = conn.execute(
-            """SELECT COALESCE(SUM(amount),0) total, COUNT(*) n
-               FROM vehicle_expenses WHERE vehicle_id=? AND user_id=?""",
+            """SELECT COUNT(*) n FROM vehicle_expenses
+               WHERE vehicle_id=? AND user_id=?""",
             (vehicle_id, user["id"])
         ).fetchone()
 
+    rates = get_currency_rates()
     title = esc((vehicle["brand"] or "") + " " + (vehicle["model"] or ""))
     plate = esc(vehicle["plate_number"] or "ثبت نشده")
-    purchase_price = float(vehicle["purchase_price"] or 0)
-    sale_price = float(vehicle["sale_price"] or 0)
-    total_expenses = float(summary["total"] or 0)
+    purchase_price = to_afn(
+        vehicle["purchase_price"],
+        vehicle["purchase_currency"] if "purchase_currency" in vehicle.keys() else "AFN",
+        rates
+    )
+    sale_price = to_afn(
+        vehicle["sale_price"],
+        vehicle["sale_currency"] if "sale_currency" in vehicle.keys() else "AFN",
+        rates
+    )
+    total_expenses = sum(
+        to_afn(e["amount"], e["currency"], rates) for e in expenses
+    )
     net_profit = sale_price - purchase_price - total_expenses
     rows = ""
     for e in expenses:
@@ -1073,7 +1422,7 @@ async def vehicle_expenses_page(request: Request, vehicle_id: int):
       <p>نمبر پلیت: {plate}</p>
       <div class="grid">
         <div class="card"><div>مجموع مصارف</div>
-          <div class="stat">{money(summary['total'])}</div><div>افغانی</div>
+          <div class="stat">{money(total_expenses)}</div><div>افغانی، تبدیل‌شده</div>
         </div>
         <div class="card"><div>تعداد مصارف</div>
           <div class="stat">{summary['n']}</div>
@@ -1099,7 +1448,9 @@ async def vehicle_expenses_page(request: Request, vehicle_id: int):
           <option value="مالیه و اسناد">مالیه و اسناد</option>
           <option value="سایر">سایر</option>
         </select>
-        <label>مبلغ به افغانی</label>
+        <label>ارز مصرف</label>
+        <select name="currency" required>{currency_options()}</select>
+        <label>مبلغ</label>
         <input type="number" name="amount" min="0.01" step="0.01" required>
         <label>تاریخ مصرف</label>
         <input type="date" name="expense_date" value="{date.today().isoformat()}" required>
@@ -1129,6 +1480,7 @@ async def vehicle_expense_create(
     vehicle_id: int,
     category: str = Form(...),
     amount: float = Form(...),
+    currency: str = Form("AFN"),
     expense_date: str = Form(...),
     description: str = Form("")
 ):
@@ -1144,7 +1496,7 @@ async def vehicle_expense_create(
         parsed_date = date.fromisoformat(expense_date)
         if amount <= 0 or amount > 1000000000000:
             raise ValueError()
-        if category not in allowed_categories:
+        if category not in allowed_categories or currency not in CURRENCIES:
             raise ValueError()
     except (ValueError, TypeError):
         return HTMLResponse(
@@ -1166,8 +1518,8 @@ async def vehicle_expense_create(
             """INSERT INTO vehicle_expenses
                (user_id, vehicle_id, category, amount, currency,
                 description, expense_date)
-               VALUES (?, ?, ?, ?, 'AFN', ?, ?)""",
-            (user["id"], vehicle_id, category, amount,
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (user["id"], vehicle_id, category, amount, currency,
              description.strip()[:1000], parsed_date.isoformat())
         )
 
@@ -1222,7 +1574,7 @@ async def transactions_page(request: Request):
     table_rows = "".join(
         f"""<tr><td>{esc(r['transaction_date'])}</td>
         <td>{'عواید' if r['transaction_type']=='income' else 'مصارف'}</td>
-        <td>{esc(r['category'])}</td><td>{money(r['amount'])} AFN</td>
+        <td>{esc(r['category'])}</td><td>{money(r['amount'])} {esc(r['currency'] or 'AFN')}</td>
         <td>{esc(r['brand'] or '')} {esc(r['model'] or '')}</td>
         <td><form method="post" action="/transactions/{r['id']}/delete" onsubmit="return confirm('این معامله حذف شود؟')"><button class="danger">حذف</button></form></td></tr>"""
         for r in rows
@@ -1239,7 +1591,8 @@ async def transactions_page(request: Request):
       <form method="post" action="/transactions">
         <label>نوع معامله</label><select name="transaction_type" required><option value="income">عواید</option><option value="expense">مصارف</option></select>
         <label>دسته‌بندی</label><input name="category" required maxlength="100" placeholder="مثلاً ترمیم، تیل، فروش">
-        <label>مبلغ به افغانی</label><input name="amount" type="number" min="0.01" step="0.01" required>
+        <label>ارز معامله</label><select name="currency" required>{currency_options()}</select>
+        <label>مبلغ</label><input name="amount" type="number" min="0.01" step="0.01" required>
         <label>موتر مربوط</label><select name="vehicle_id">{options}</select>
         <label>تاریخ</label><input name="transaction_date" type="date">
         <label>توضیحات</label><textarea name="description" maxlength="2000"></textarea>
@@ -1259,6 +1612,7 @@ async def transaction_create(
     transaction_type: str = Form(...),
     category: str = Form(...),
     amount: float = Form(...),
+    currency: str = Form("AFN"),
     vehicle_id: str = Form(""),
     transaction_date: str = Form(""),
     description: str = Form("")
@@ -1266,7 +1620,9 @@ async def transaction_create(
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
-    if transaction_type not in ("income", "expense") or amount <= 0 or amount > 1_000_000_000:
+    if (transaction_type not in ("income", "expense")
+            or currency not in CURRENCIES
+            or amount <= 0 or amount > 1_000_000_000):
         return HTMLResponse(page("خطا", "<p>نوع معامله یا مبلغ معتبر نیست.</p><a href='/transactions'>بازگشت</a>", user), status_code=400)
     vid = None
     if vehicle_id.strip():
@@ -1291,9 +1647,9 @@ async def transaction_create(
             """INSERT INTO transactions
             (user_id, vehicle_id, transaction_type, category, amount,
              currency, description, transaction_date)
-            VALUES(?,?,?,?,?,'AFN',?,?)""",
+            VALUES(?,?,?,?,?,?,?,?)""",
             (user["id"], vid, transaction_type, category.strip()[:100],
-             amount, description.strip()[:2000], date_value)
+             amount, currency, description.strip()[:2000], date_value)
         )
     audit(user["id"], "transaction_create", f"{transaction_type}: {amount}")
     return RedirectResponse("/transactions", status_code=303)
@@ -1531,16 +1887,20 @@ async def account_download_pdf(request: Request):
         finally:
             conn.close()
 
+        rates = get_currency_rates()
         total_purchase = sum(
-            float(v["purchase_price"] or 0) for v in vehicles
+            to_afn(v["purchase_price"],
+                   v["purchase_currency"] if "purchase_currency" in v.keys() else "AFN",
+                   rates) for v in vehicles
         )
         total_sale = sum(
-            float(v["sale_price"] or 0) for v in vehicles
+            to_afn(v["sale_price"],
+                   v["sale_currency"] if "sale_currency" in v.keys() else "AFN",
+                   rates) for v in vehicles
         )
         total_vehicle_expenses = sum(
-            float(e["amount"] or 0)
-            for items in expenses_by_vehicle.values()
-            for e in items
+            to_afn(e["amount"], e["currency"], rates)
+            for items in expenses_by_vehicle.values() for e in items
         )
         overall_profit = (
             total_sale - total_purchase - total_vehicle_expenses
@@ -1610,10 +1970,18 @@ async def account_download_pdf(request: Request):
                 vid = int(vehicle["id"])
                 expenses = expenses_by_vehicle.get(vid, [])
                 expense_total = sum(
-                    float(e["amount"] or 0) for e in expenses
+                    to_afn(e["amount"], e["currency"], rates) for e in expenses
                 )
-                purchase = float(vehicle["purchase_price"] or 0)
-                sale = float(vehicle["sale_price"] or 0)
+                purchase = to_afn(
+                    vehicle["purchase_price"],
+                    vehicle["purchase_currency"] if "purchase_currency" in vehicle.keys() else "AFN",
+                    rates
+                )
+                sale = to_afn(
+                    vehicle["sale_price"],
+                    vehicle["sale_currency"] if "sale_currency" in vehicle.keys() else "AFN",
+                    rates
+                )
                 profit = sale - purchase - expense_total
 
                 brand_model = (
@@ -1825,6 +2193,7 @@ async def owner_page(request: Request):
       <div class="card"><div>تمام موترها</div><div class="stat">{vehicle_count}</div></div>
       <div class="card"><div>تمام معاملات</div><div class="stat">{tx_count}</div></div>
     </div>
+    <div class="card"><h2>مدیریت نرخ ارز</h2><p><a class="btn" href="/owner/currencies">تنظیم نرخ ارز</a></p></div>
     <div class="card"><h2>ارسال اعلان عمومی</h2>
       <form method="post" action="/owner/broadcast">
         <label>عنوان پیام</label><input name="title" required maxlength="150">
@@ -1891,34 +2260,24 @@ async def health():
 @app.get("/api/database")
 async def database_status():
     with get_db() as conn:
-        tables = conn.execute("""
-            SELECT name FROM sqlite_master
-            WHERE type='table' AND name NOT LIKE 'sqlite_%'
-            ORDER BY name
-        """).fetchall()
+        if DATABASE_URL:
+            tables = conn.execute("""
+                SELECT table_name AS name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                  AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+            """).fetchall()
+            database_name = "Supabase PostgreSQL"
+        else:
+            tables = conn.execute("""
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+            """).fetchall()
+            database_name = DB_PATH.name
     return {
-        "database": DB_PATH.name,
+        "database": database_name,
         "status": "connected",
         "tables": [row["name"] for row in tables],
     }
-
-
-if __name__ == "__main__":
-    init_db()
-    if len(sys.argv) > 1 and sys.argv[1] == "create-owner":
-        username = input("Owner username: ").strip().lower()
-        full_name = input("Owner full name: ").strip()
-        password = getpass.getpass("Owner password (minimum 10 characters): ")
-        confirm = getpass.getpass("Confirm password: ")
-        if password != confirm:
-            print("ERROR: Passwords do not match.")
-            sys.exit(1)
-        try:
-            create_owner(username, full_name, password)
-            print("SUCCESS: Owner account created. Keep your password private.")
-        except (ValueError, sqlite3.IntegrityError) as exc:
-            print("ERROR:", exc)
-            sys.exit(1)
-    else:
-        import uvicorn
-        uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=False)

@@ -24,3 +24,4 @@ Authlib==1.9.1
 reportlab
 arabic-reshaper
 python-bidi
+pg8000
