@@ -437,7 +437,7 @@ def current_user(request):
         return None
     with get_db() as conn:
         user = conn.execute(
-            "SELECT id, username, full_name, role, is_active "
+            "SELECT id, username, full_name, role, is_active, created_at "
             "FROM users WHERE id=?", (uid,)
         ).fetchone()
     if not user or not user["is_active"]:
