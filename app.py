@@ -8,10 +8,13 @@ import html
 import hashlib
 import secrets
 import getpass
+import io
+import math
+import mimetypes
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi import FastAPI, Request, Form, UploadFile, File
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -23,6 +26,16 @@ DATA_DIR = BASE_DIR / "data"
 STATIC_DIR = BASE_DIR / "static"
 TEMPLATES_DIR = BASE_DIR / "templates"
 DB_PATH = DATA_DIR / "tawfiq_auto.db"
+
+# TAWFIQ_AUTO_PRO_FEATURES_V1
+VEHICLE_PHOTO_DIR = DATA_DIR / "vehicle_images"
+VEHICLE_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
+MAX_VEHICLE_PHOTO_SIZE = 5 * 1024 * 1024
+DEFAULT_VEHICLE_IMAGE = (
+    "https://images.unsplash.com/photo-1503376780353-7e6692767b70"
+    "?auto=format&fit=crop&w=900&q=80"
+)
+
 
 for folder in (DATA_DIR, STATIC_DIR, TEMPLATES_DIR):
     folder.mkdir(parents=True, exist_ok=True)
@@ -136,6 +149,8 @@ def init_db():
             conn.execute(
                 "ALTER TABLE vehicles ADD COLUMN sale_price REAL NOT NULL DEFAULT 0"
             )
+        if "photo_path" not in vehicle_columns:
+            conn.execute("ALTER TABLE vehicles ADD COLUMN photo_path TEXT")
 
 
 def hash_password(password):
@@ -680,8 +695,8 @@ async def vehicles_page(request: Request):
         cards += f"""
         <article class="vehicle-card" data-search="{searchable}">
           <div class="vehicle-photo">
-            <img src="https://images.unsplash.com/photo-1503376780353-7e6692767b70?auto=format&fit=crop&w=900&q=80"
-                 alt="تصویر نمایشی موتر" loading="lazy">
+            <img src="{('/vehicles/' + str(vehicle_id) + '/photo') if v['photo_path'] else DEFAULT_VEHICLE_IMAGE}"
+                 alt="تصویر موتر" loading="lazy">
             <span class="vehicle-id">TAP #{vehicle_id:04d}</span>
           </div>
           <div class="vehicle-card-content">
@@ -744,7 +759,7 @@ async def vehicles_page(request: Request):
     <div class="card vehicle-form-card">
       <div class="vehicle-overline">ADD TO YOUR GARAGE</div>
       <h2>＋ ثبت موتر جدید</h2>
-      <form method="post" action="/vehicles">
+      <form method="post" action="/vehicles" enctype="multipart/form-data">
         <div class="grid">
           <div><label>نمبر پلیت</label><input name="plate_number" maxlength="50"></div>
           <div><label>برند / شرکت</label><input name="brand" required maxlength="80"></div>
@@ -756,6 +771,9 @@ async def vehicles_page(request: Request):
           <div><label>قیمت خرید (افغانی)</label><input name="purchase_price" type="number" min="0" step="0.01" value="0"></div>
           <div><label>قیمت فروش (افغانی، پس از فروش)</label><input name="sale_price" type="number" min="0" step="0.01" value="0"></div>
         </div>
+        <label>عکس موتر (اختیاری، حداکثر ۵ مگابایت)</label>
+        <input type="file" name="photo" accept="image/jpeg,image/png,image/webp">
+        <p class="small">فرمت‌های مجاز: JPG، PNG و WebP. عکس به‌صورت خصوصی نگهداری می‌شود.</p>
         <label>یادداشت</label>
         <textarea name="notes" maxlength="2000"></textarea>
         <button type="submit">ذخیره موتر</button>
@@ -807,34 +825,110 @@ async def vehicle_create(
     engine_number: str = Form(""),
     notes: str = Form(""),
     purchase_price: float = Form(0),
-    sale_price: float = Form(0)
+    sale_price: float = Form(0),
+    photo: UploadFile | None = File(None),
 ):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
+
+    brand = brand.strip()
+    model = model.strip()
+    if not brand or not model or len(brand) > 80 or len(model) > 80:
+        return HTMLResponse(
+            page("خطا", "<p>برند و مدل موتر را درست وارد کن.</p><a href='/vehicles'>بازگشت</a>", user),
+            status_code=400,
+        )
+
     try:
         year = int(manufacture_year) if manufacture_year.strip() else None
         if year is not None and not 1886 <= year <= 2100:
-            raise ValueError()
-    except ValueError:
-        return HTMLResponse(page("خطا", "<p>سال ساخت معتبر نیست.</p><a href='/vehicles'>بازگشت</a>", user), status_code=400)
-    try:
-        if purchase_price < 0 or sale_price < 0 or purchase_price > 1_000_000_000_000 or sale_price > 1_000_000_000_000:
-            raise ValueError()
+            raise ValueError
     except (ValueError, TypeError):
-        return HTMLResponse(page("خطا", "<p>قیمت خرید یا فروش معتبر نیست.</p><a href='/vehicles'>بازگشت</a>", user), status_code=400)
-
-    with get_db() as conn:
-        conn.execute(
-            """INSERT INTO vehicles
-            (user_id, plate_number, brand, model, manufacture_year, color,
-             chassis_number, engine_number, notes, purchase_price, sale_price)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-            (user["id"], plate_number.strip(), brand.strip(), model.strip(),
-             year, color.strip(), chassis_number.strip(),
-             engine_number.strip(), notes.strip(), purchase_price, sale_price)
+        return HTMLResponse(
+            page("خطا", "<p>سال ساخت معتبر نیست.</p><a href='/vehicles'>بازگشت</a>", user),
+            status_code=400,
         )
-    audit(user["id"], "vehicle_create", brand + " " + model)
+
+    if (
+        not math.isfinite(purchase_price)
+        or not math.isfinite(sale_price)
+        or purchase_price < 0
+        or sale_price < 0
+        or purchase_price > 1_000_000_000_000
+        or sale_price > 1_000_000_000_000
+    ):
+        return HTMLResponse(
+            page("خطا", "<p>قیمت خرید یا فروش معتبر نیست.</p><a href='/vehicles'>بازگشت</a>", user),
+            status_code=400,
+        )
+
+    photo_name = None
+    photo_target = None
+
+    if photo and photo.filename:
+        try:
+            raw = await photo.read(MAX_VEHICLE_PHOTO_SIZE + 1)
+        finally:
+            await photo.close()
+
+        if len(raw) > MAX_VEHICLE_PHOTO_SIZE:
+            return HTMLResponse(
+                page("خطا", "<p>حجم عکس نباید بیشتر از ۵ مگابایت باشد.</p><a href='/vehicles'>بازگشت</a>", user),
+                status_code=413,
+            )
+
+        if not raw:
+            return HTMLResponse(
+                page("خطا", "<p>فایل عکس خالی است.</p><a href='/vehicles'>بازگشت</a>", user),
+                status_code=400,
+            )
+
+        if raw.startswith(b"\xff\xd8\xff"):
+            extension = ".jpg"
+        elif raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            extension = ".png"
+        elif len(raw) >= 12 and raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            extension = ".webp"
+        else:
+            return HTMLResponse(
+                page("خطا", "<p>فایل باید یک عکس واقعی JPG، PNG یا WebP باشد.</p><a href='/vehicles'>بازگشت</a>", user),
+                status_code=400,
+            )
+
+        photo_name = secrets.token_hex(20) + extension
+        photo_target = VEHICLE_PHOTO_DIR / photo_name
+        try:
+            with photo_target.open("xb") as fh:
+                fh.write(raw)
+        except OSError:
+            return HTMLResponse(
+                page("خطا", "<p>ذخیره عکس ناموفق شد؛ دوباره تلاش کن.</p><a href='/vehicles'>بازگشت</a>", user),
+                status_code=500,
+            )
+
+    try:
+        with get_db() as conn:
+            conn.execute(
+                """INSERT INTO vehicles
+                (user_id, plate_number, brand, model, manufacture_year, color,
+                 chassis_number, engine_number, notes, purchase_price, sale_price, photo_path)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    user["id"], plate_number.strip(), brand, model, year,
+                    color.strip(), chassis_number.strip(), engine_number.strip(),
+                    notes.strip(), purchase_price, sale_price, photo_name,
+                ),
+            )
+        audit(user["id"], "vehicle_create", brand + " " + model)
+    except Exception:
+        if photo_target:
+            try:
+                photo_target.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
     return RedirectResponse("/vehicles", status_code=303)
 
 
@@ -843,14 +937,77 @@ async def vehicle_delete(request: Request, vehicle_id: int):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
+
+    photo_name = None
+    deleted = False
     with get_db() as conn:
-        conn.execute(
-            "DELETE FROM vehicles WHERE id=? AND user_id=?",
-            (vehicle_id, user["id"])
-        )
-    audit(user["id"], "vehicle_delete", str(vehicle_id))
+        row = conn.execute(
+            "SELECT photo_path FROM vehicles WHERE id=? AND user_id=?",
+            (vehicle_id, user["id"]),
+        ).fetchone()
+        if row:
+            photo_name = row["photo_path"]
+            cur = conn.execute(
+                "DELETE FROM vehicles WHERE id=? AND user_id=?",
+                (vehicle_id, user["id"]),
+            )
+            deleted = cur.rowcount == 1
+
+    if deleted:
+        audit(user["id"], "vehicle_delete", str(vehicle_id))
+        if photo_name:
+            # Only remove a simple filename from the dedicated private folder.
+            safe_name = Path(photo_name).name
+            if safe_name == photo_name:
+                try:
+                    (VEHICLE_PHOTO_DIR / safe_name).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     return RedirectResponse("/vehicles", status_code=303)
 
+
+@app.get("/vehicles/{vehicle_id}/photo")
+async def vehicle_photo(request: Request, vehicle_id: int):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT photo_path FROM vehicles WHERE id=? AND user_id=?",
+            (vehicle_id, user["id"]),
+        ).fetchone()
+
+    if not row or not row["photo_path"]:
+        return HTMLResponse("عکس موتر پیدا نشد.", status_code=404)
+
+    name = row["photo_path"]
+    if Path(name).name != name or name in ("", ".", ".."):
+        return HTMLResponse("مسیر عکس معتبر نیست.", status_code=404)
+
+    target = (VEHICLE_PHOTO_DIR / name).resolve()
+    try:
+        target.relative_to(VEHICLE_PHOTO_DIR.resolve())
+    except ValueError:
+        return HTMLResponse("مسیر عکس معتبر نیست.", status_code=404)
+
+    if not target.is_file():
+        return HTMLResponse("عکس موتر پیدا نشد.", status_code=404)
+
+    mime = {
+        ".jpg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+    }.get(target.suffix.lower())
+    if not mime:
+        return HTMLResponse("نوع عکس معتبر نیست.", status_code=404)
+
+    return FileResponse(
+        target,
+        media_type=mime,
+        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 @app.get("/vehicles/{vehicle_id}/expenses", response_class=HTMLResponse)
@@ -1161,24 +1318,175 @@ async def account_page(request: Request):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
-    body = f"""
-<section class="panel-banner banner-account">
-<div class="panel-banner-content">
-<div class="eyebrow">YOUR PRIVATE PROFILE</div>
-<h2>حساب اختصاصی تو</h2>
-<p>اطلاعات حساب کاربری خود را در یک فضای شیک مشاهده کن.</p>
-</div></section>
 
+    body = f"""
+    <section class="panel-banner banner-account">
+      <div class="panel-banner-content">
+        <div class="eyebrow">YOUR PRIVATE PROFILE</div>
+        <h2>حساب اختصاصی تو</h2>
+        <p>اطلاعات حساب کاربری خود را در یک فضای شیک مشاهده کن.</p>
+      </div>
+    </section>
     <div class="card">
       <p><b>نام کامل:</b> {esc(user['full_name'])}</p>
       <p><b>نام کاربری:</b> {esc(user['username'])}</p>
       <p><b>نقش:</b> {'مالک سیستم' if user['role']=='owner' else 'کاربر'}</p>
       <p><b>شناسه داخلی:</b> {user['id']}</p>
-      <p class="small">رمز عبور به شکل هش‌شده ذخیره می‌شود؛ رمز اصلی در دیتابیس ذخیره نمی‌شود.</p>
+      <p class="small">رمز عبور به شکل هش‌شده ذخیره می‌شود و در فایل‌های دانلودی درج نمی‌شود.</p>
+      <a class="btn" href="/account/download.pdf">دانلود پروفایل PDF</a>
+      <a class="btn" href="/account/download.svg">دانلود پروفایل تصویری SVG</a>
       <a class="btn" href="/dashboard">بازگشت به داشبورد</a>
     </div>
     """
     return HTMLResponse(page("حساب کاربری", body, user))
+
+
+@app.get("/account/download.svg")
+async def account_download_svg(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    full_name = html.escape(str(user["full_name"] or ""), quote=True)
+    username = html.escape(str(user["username"] or ""), quote=True)
+    role = "مالک سیستم" if user["role"] == "owner" else "کاربر"
+    role = html.escape(role, quote=True)
+    user_id = int(user["id"])
+
+    svg = f"""<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+ <defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+ <stop offset="0" stop-color="#080808"/><stop offset="1" stop-color="#252016"/>
+ </linearGradient><linearGradient id="gold"><stop stop-color="#b28b43"/><stop offset="0.5" stop-color="#f3dfaa"/><stop offset="1" stop-color="#c4a052"/></linearGradient></defs>
+ <rect width="1200" height="760" rx="32" fill="url(#bg)"/>
+ <rect x="24" y="24" width="1152" height="712" rx="24" fill="none" stroke="url(#gold)" stroke-width="3"/>
+ <text x="600" y="120" fill="#f3dfaa" font-family="sans-serif" font-size="43" font-weight="bold" text-anchor="middle">TAWFIQ AUTO PRO</text>
+ <text x="600" y="175" fill="#d5b36a" font-family="sans-serif" font-size="28" text-anchor="middle">PRIVATE ACCOUNT PROFILE</text>
+ <line x1="130" y1="220" x2="1070" y2="220" stroke="#d5b36a" stroke-opacity=".6"/>
+ <g fill="#f5f1e8" font-family="Noto Naskh Arabic, sans-serif" font-size="32" direction="rtl" text-anchor="end">
+ <text x="1020" y="310">نام کامل: {full_name}</text>
+ <text x="1020" y="390">نام کاربری: {username}</text>
+ <text x="1020" y="470">نقش حساب: {role}</text>
+ <text x="1020" y="550">شناسه داخلی: {user_id}</text>
+ </g>
+ <text x="600" y="665" fill="#d5b36a" font-family="sans-serif" font-size="22" text-anchor="middle">PRIVATE PROFILE · TAWFIQ AUTO PRO</text>
+</svg>"""
+
+    return Response(
+        content=svg,
+        media_type="image/svg+xml",
+        headers={
+            "Content-Disposition": 'attachment; filename="tawfiq-profile.svg"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@app.get("/account/download.pdf")
+async def account_download_pdf(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_RIGHT, TA_CENTER
+        from reportlab.lib.units import mm
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+
+        font_path = Path("/system/fonts/NotoNaskhArabic-Regular.ttf")
+        if not font_path.is_file():
+            font_path = Path("/system/fonts/NotoNaskhArabicUI-Regular.ttf")
+        if not font_path.is_file():
+            raise FileNotFoundError("فونت فارسی پیدا نشد.")
+
+        font_name = "TawfiqNaskh"
+        if font_name not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+
+        def rtl(value):
+            return html.escape(get_display(arabic_reshaper.reshape(str(value))))
+
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buffer, pagesize=A4,
+            rightMargin=22*mm, leftMargin=22*mm,
+            topMargin=24*mm, bottomMargin=22*mm,
+            title="TAWFIQ AUTO PRO - Profile",
+            author="TAWFIQ AUTO PRO",
+        )
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "TawfiqTitle", parent=styles["Title"], fontName=font_name,
+            fontSize=23, leading=34, textColor=colors.HexColor("#b28b43"),
+            alignment=TA_CENTER, spaceAfter=8*mm,
+        )
+        normal_style = ParagraphStyle(
+            "TawfiqNormal", parent=styles["Normal"], fontName=font_name,
+            fontSize=13, leading=24, alignment=TA_RIGHT,
+        )
+        subtitle_style = ParagraphStyle(
+            "TawfiqSubtitle", parent=styles["Normal"], fontName=font_name,
+            fontSize=10, leading=18, alignment=TA_CENTER,
+            textColor=colors.HexColor("#76633b"),
+        )
+
+        role = "مالک سیستم" if user["role"] == "owner" else "کاربر"
+        story = [
+            Paragraph("TAWFIQ AUTO PRO", title_style),
+            Paragraph(rtl("پروفایل اختصاصی حساب کاربری"), subtitle_style),
+            Spacer(1, 12*mm),
+        ]
+        rows = [
+            [Paragraph(rtl("نام کامل"), normal_style),
+             Paragraph(rtl(user["full_name"] or ""), normal_style)],
+            [Paragraph(rtl("نام کاربری"), normal_style),
+             Paragraph(rtl(user["username"] or ""), normal_style)],
+            [Paragraph(rtl("نقش حساب"), normal_style),
+             Paragraph(rtl(role), normal_style)],
+            [Paragraph(rtl("شناسه داخلی"), normal_style),
+             Paragraph(str(int(user["id"])), normal_style)],
+        ]
+        table = Table(rows, colWidths=[42*mm, 112*mm], hAlign="RIGHT")
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#f8f4e9")),
+            ("TEXTCOLOR", (0,0), (-1,-1), colors.HexColor("#17130c")),
+            ("GRID", (0,0), (-1,-1), 0.6, colors.HexColor("#d5b36a")),
+            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+            ("LEFTPADDING", (0,0), (-1,-1), 10),
+            ("RIGHTPADDING", (0,0), (-1,-1), 10),
+            ("TOPPADDING", (0,0), (-1,-1), 12),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 12),
+        ]))
+        story.extend([table, Spacer(1, 18*mm),
+                      Paragraph("TAWFIQ AUTO PRO · PRIVATE PROFILE", subtitle_style)])
+        doc.build(story)
+        pdf = buffer.getvalue()
+        buffer.close()
+
+        return Response(
+            content=pdf,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": 'attachment; filename="tawfiq-profile.pdf"',
+                "Cache-Control": "private, no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    except Exception:
+        return HTMLResponse(
+            page("خطای ساخت PDF",
+                 "<p>ساخت PDF موفق نشد. نصب بودن کتابخانه‌های PDF و فونت فارسی را بررسی کن.</p>"
+                 "<a href='/account'>بازگشت به پروفایل</a>", user),
+            status_code=500,
+        )
 
 
 @app.get("/notifications", response_class=HTMLResponse)
