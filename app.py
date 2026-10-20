@@ -1383,11 +1383,15 @@ async def account_download_svg(request: Request):
     )
 
 
+
+
 @app.get("/account/download.pdf")
 async def account_download_pdf(request: Request):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
+
+    import logging
 
     try:
         from reportlab.lib import colors
@@ -1397,77 +1401,346 @@ async def account_download_pdf(request: Request):
         from reportlab.lib.units import mm
         from reportlab.pdfbase import pdfmetrics
         from reportlab.pdfbase.ttfonts import TTFont
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.platypus import (
+            SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+            PageBreak, Image as PDFImage, KeepTogether
+        )
         import arabic_reshaper
         from bidi.algorithm import get_display
+        import io
+        import os
 
-        font_path = Path("/system/fonts/NotoNaskhArabic-Regular.ttf")
+        font_path = (
+            BASE_DIR / "assets" / "fonts" /
+            "NotoNaskhArabic-Regular.ttf"
+        )
         if not font_path.is_file():
-            font_path = Path("/system/fonts/NotoNaskhArabicUI-Regular.ttf")
-        if not font_path.is_file():
-            raise FileNotFoundError("فونت فارسی پیدا نشد.")
+            raise FileNotFoundError("Project Persian font is missing.")
 
         font_name = "TawfiqNaskh"
         if font_name not in pdfmetrics.getRegisteredFontNames():
             pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
 
         def rtl(value):
-            return html.escape(get_display(arabic_reshaper.reshape(str(value))))
+            value = "" if value is None else str(value)
+            shaped = arabic_reshaper.reshape(value)
+            return html.escape(get_display(shaped))
+
+        def money(value):
+            try:
+                return f"{float(value or 0):,.2f}".rstrip("0").rstrip(".")
+            except (TypeError, ValueError):
+                return "0"
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "TawfiqReportTitle",
+            parent=styles["Title"],
+            fontName=font_name,
+            fontSize=22,
+            leading=32,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#a77b2d"),
+            spaceAfter=5 * mm,
+        )
+        heading_style = ParagraphStyle(
+            "TawfiqSection",
+            parent=styles["Heading2"],
+            fontName=font_name,
+            fontSize=15,
+            leading=23,
+            alignment=TA_RIGHT,
+            textColor=colors.HexColor("#8b682b"),
+            spaceBefore=5 * mm,
+            spaceAfter=3 * mm,
+        )
+        normal_style = ParagraphStyle(
+            "TawfiqNormal",
+            parent=styles["Normal"],
+            fontName=font_name,
+            fontSize=9,
+            leading=15,
+            alignment=TA_RIGHT,
+            wordWrap="RTL",
+        )
+        small_style = ParagraphStyle(
+            "TawfiqSmall",
+            parent=normal_style,
+            fontSize=8,
+            leading=12,
+        )
+
+        def P(value, style=normal_style):
+            return Paragraph(rtl(value), style)
+
+        def make_table(rows, widths, header=True):
+            converted = []
+            for row_index, row in enumerate(rows):
+                converted.append([
+                    cell if hasattr(cell, "getKeepWithNext")
+                    else P(cell, small_style if row_index else normal_style)
+                    for cell in row
+                ])
+
+            table = Table(
+                converted,
+                colWidths=widths,
+                repeatRows=1 if header else 0,
+                hAlign="RIGHT",
+            )
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0),
+                 colors.HexColor("#eee5d0") if header
+                 else colors.white),
+                ("TEXTCOLOR", (0, 0), (-1, -1),
+                 colors.HexColor("#201b12")),
+                ("GRID", (0, 0), (-1, -1),
+                 0.4, colors.HexColor("#d8c69e")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ("TOPPADDING", (0, 0), (-1, -1), 5),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+            ]))
+            return table
+
+        conn = get_db()
+        try:
+            user_id = int(user["id"])
+
+            vehicles = conn.execute(
+                "SELECT * FROM vehicles WHERE user_id=? ORDER BY id DESC",
+                (user_id,),
+            ).fetchall()
+
+            expenses_by_vehicle = {}
+            for vehicle in vehicles:
+                expenses_by_vehicle[int(vehicle["id"])] = conn.execute(
+                    """SELECT * FROM vehicle_expenses
+                       WHERE user_id=? AND vehicle_id=?
+                       ORDER BY expense_date DESC, id DESC""",
+                    (user_id, int(vehicle["id"])),
+                ).fetchall()
+
+            transactions = conn.execute(
+                """SELECT * FROM transactions
+                   WHERE user_id=?
+                   ORDER BY transaction_date DESC, id DESC""",
+                (user_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        total_purchase = sum(
+            float(v["purchase_price"] or 0) for v in vehicles
+        )
+        total_sale = sum(
+            float(v["sale_price"] or 0) for v in vehicles
+        )
+        total_vehicle_expenses = sum(
+            float(e["amount"] or 0)
+            for items in expenses_by_vehicle.values()
+            for e in items
+        )
+        overall_profit = (
+            total_sale - total_purchase - total_vehicle_expenses
+        )
 
         buffer = io.BytesIO()
         doc = SimpleDocTemplate(
-            buffer, pagesize=A4,
-            rightMargin=22*mm, leftMargin=22*mm,
-            topMargin=24*mm, bottomMargin=22*mm,
-            title="TAWFIQ AUTO PRO - Profile",
+            buffer,
+            pagesize=A4,
+            rightMargin=20 * mm,
+            leftMargin=20 * mm,
+            topMargin=20 * mm,
+            bottomMargin=20 * mm,
+            title="TAWFIQ AUTO PRO - Full Account Report",
             author="TAWFIQ AUTO PRO",
         )
-        styles = getSampleStyleSheet()
-        title_style = ParagraphStyle(
-            "TawfiqTitle", parent=styles["Title"], fontName=font_name,
-            fontSize=23, leading=34, textColor=colors.HexColor("#b28b43"),
-            alignment=TA_CENTER, spaceAfter=8*mm,
-        )
-        normal_style = ParagraphStyle(
-            "TawfiqNormal", parent=styles["Normal"], fontName=font_name,
-            fontSize=13, leading=24, alignment=TA_RIGHT,
-        )
-        subtitle_style = ParagraphStyle(
-            "TawfiqSubtitle", parent=styles["Normal"], fontName=font_name,
-            fontSize=10, leading=18, alignment=TA_CENTER,
-            textColor=colors.HexColor("#76633b"),
-        )
+
+        story = [
+            P("TAWFIQ AUTO PRO", title_style),
+            P("گزارش کامل حساب، موترها و حسابداری", heading_style),
+            P("تاریخ تهیه گزارش: " + datetime.now().strftime("%Y-%m-%d %H:%M")),
+            Spacer(1, 4 * mm),
+            P("۱. اطلاعات حساب کاربری", heading_style),
+        ]
 
         role = "مالک سیستم" if user["role"] == "owner" else "کاربر"
-        story = [
-            Paragraph("TAWFIQ AUTO PRO", title_style),
-            Paragraph(rtl("پروفایل اختصاصی حساب کاربری"), subtitle_style),
-            Spacer(1, 12*mm),
+        profile_rows = [
+            ["مشخصات", "اطلاعات"],
+            ["نام کامل", user["full_name"] or "ثبت نشده"],
+            ["نام کاربری", user["username"] or "ثبت نشده"],
+            ["نقش حساب", role],
+            ["شناسه حساب", str(user_id)],
+            ["تاریخ ایجاد حساب", user["created_at"] or "ثبت نشده"],
         ]
-        rows = [
-            [Paragraph(rtl("نام کامل"), normal_style),
-             Paragraph(rtl(user["full_name"] or ""), normal_style)],
-            [Paragraph(rtl("نام کاربری"), normal_style),
-             Paragraph(rtl(user["username"] or ""), normal_style)],
-            [Paragraph(rtl("نقش حساب"), normal_style),
-             Paragraph(rtl(role), normal_style)],
-            [Paragraph(rtl("شناسه داخلی"), normal_style),
-             Paragraph(str(int(user["id"])), normal_style)],
+        story.append(make_table(
+            profile_rows, [48 * mm, 118 * mm]
+        ))
+
+        story.extend([
+            Spacer(1, 5 * mm),
+            P("۲. خلاصه حسابداری تمام موترها", heading_style),
+        ])
+
+        summary_rows = [
+            ["عنوان", "مقدار"],
+            ["تعداد موترها", str(len(vehicles))],
+            ["مجموع قیمت خرید", money(total_purchase) + " افغانی"],
+            ["مجموع قیمت فروش ثبت‌شده", money(total_sale) + " افغانی"],
+            ["مجموع مصارف مستقیم موترها",
+             money(total_vehicle_expenses) + " افغانی"],
+            ["سود / زیان خالص حساب",
+             money(overall_profit) + " افغانی"],
         ]
-        table = Table(rows, colWidths=[42*mm, 112*mm], hAlign="RIGHT")
-        table.setStyle(TableStyle([
-            ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#f8f4e9")),
-            ("TEXTCOLOR", (0,0), (-1,-1), colors.HexColor("#17130c")),
-            ("GRID", (0,0), (-1,-1), 0.6, colors.HexColor("#d5b36a")),
-            ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-            ("LEFTPADDING", (0,0), (-1,-1), 10),
-            ("RIGHTPADDING", (0,0), (-1,-1), 10),
-            ("TOPPADDING", (0,0), (-1,-1), 12),
-            ("BOTTOMPADDING", (0,0), (-1,-1), 12),
-        ]))
-        story.extend([table, Spacer(1, 18*mm),
-                      Paragraph("TAWFIQ AUTO PRO · PRIVATE PROFILE", subtitle_style)])
-        doc.build(story)
+        story.append(make_table(
+            summary_rows, [90 * mm, 76 * mm]
+        ))
+
+        story.extend([
+            Spacer(1, 5 * mm),
+            P("۳. مشخصات و حسابداری موترها", heading_style),
+        ])
+
+        if not vehicles:
+            story.append(P("هنوز هیچ موتری در این حساب ثبت نشده است."))
+        else:
+            for index, vehicle in enumerate(vehicles, 1):
+                vid = int(vehicle["id"])
+                expenses = expenses_by_vehicle.get(vid, [])
+                expense_total = sum(
+                    float(e["amount"] or 0) for e in expenses
+                )
+                purchase = float(vehicle["purchase_price"] or 0)
+                sale = float(vehicle["sale_price"] or 0)
+                profit = sale - purchase - expense_total
+
+                brand_model = (
+                    f"{vehicle['brand'] or ''} "
+                    f"{vehicle['model'] or ''}"
+                ).strip()
+
+                block = [
+                    P(f"موتر {index}: {brand_model}", heading_style)
+                ]
+
+                photo_name = vehicle["photo_path"]
+                if photo_name:
+                    photo_dir = (DATA_DIR / "vehicle_images").resolve()
+                    photo_path = (photo_dir / Path(photo_name).name).resolve()
+                    try:
+                        if (
+                            photo_path.is_file()
+                            and photo_path.parent == photo_dir
+                            and photo_path.stat().st_size <= 5 * 1024 * 1024
+                        ):
+                            block.append(PDFImage(
+                                str(photo_path),
+                                width=65 * mm,
+                                height=38 * mm,
+                                kind="proportional",
+                            ))
+                            block.append(Spacer(1, 2 * mm))
+                    except Exception:
+                        logging.warning(
+                            "Skipping unreadable vehicle photo; vehicle_id=%s",
+                            vid,
+                        )
+
+                vehicle_rows = [
+                    ["مشخصات", "مقدار"],
+                    ["نمبر پلیت", vehicle["plate_number"] or "ثبت نشده"],
+                    ["برند و مدل", brand_model],
+                    ["سال ساخت", vehicle["manufacture_year"] or "نامشخص"],
+                    ["رنگ", vehicle["color"] or "نامشخص"],
+                    ["نمبر شاسی", vehicle["chassis_number"] or "ثبت نشده"],
+                    ["نمبر انجن", vehicle["engine_number"] or "ثبت نشده"],
+                    ["تاریخ ثبت", vehicle["created_at"] or "ثبت نشده"],
+                    ["قیمت خرید", money(purchase) + " افغانی"],
+                    ["قیمت فروش", money(sale) + " افغانی"],
+                    ["مجموع مصارف", money(expense_total) + " افغانی"],
+                    ["سود / زیان خالص",
+                     money(profit) + " افغانی"
+                     + (" (فروخته نشده)" if sale <= 0 else "")],
+                ]
+                block.append(make_table(
+                    vehicle_rows, [48 * mm, 118 * mm]
+                ))
+
+                block.append(Spacer(1, 2 * mm))
+                block.append(P("ریز مصارف موتر", normal_style))
+
+                if expenses:
+                    expense_rows = [
+                        ["تاریخ", "دسته‌بندی", "شرح", "مبلغ"]
+                    ]
+                    for e in expenses:
+                        expense_rows.append([
+                            e["expense_date"] or "",
+                            e["category"] or "",
+                            e["description"] or "—",
+                            money(e["amount"]) + " " + (e["currency"] or "AFN"),
+                        ])
+                    block.append(make_table(
+                        expense_rows,
+                        [27 * mm, 37 * mm, 67 * mm, 35 * mm],
+                    ))
+                else:
+                    block.append(P("برای این موتر مصرفی ثبت نشده است."))
+
+                story.append(KeepTogether(block))
+                story.append(Spacer(1, 5 * mm))
+
+        story.extend([
+            Spacer(1, 4 * mm),
+            P("۴. دفتر تراکنش‌های مالی", heading_style),
+        ])
+
+        if transactions:
+            transaction_rows = [
+                ["تاریخ", "نوع", "دسته‌بندی", "شرح", "مبلغ"]
+            ]
+            for t in transactions:
+                kind = (
+                    "درآمد" if t["transaction_type"] == "income"
+                    else "مصرف"
+                )
+                transaction_rows.append([
+                    t["transaction_date"] or "",
+                    kind,
+                    t["category"] or "",
+                    t["description"] or "—",
+                    money(t["amount"]) + " " + (t["currency"] or "AFN"),
+                ])
+            story.append(make_table(
+                transaction_rows,
+                [25 * mm, 23 * mm, 34 * mm, 53 * mm, 31 * mm],
+            ))
+        else:
+            story.append(P("تراکنش مالی جداگانه‌ای ثبت نشده است."))
+
+        story.extend([
+            Spacer(1, 10 * mm),
+            P("این گزارش خصوصی و مربوط به حساب واردشده است.", small_style),
+            P("TAWFIQ AUTO PRO · PRIVATE ACCOUNTING REPORT", small_style),
+        ])
+
+        def page_footer(canvas, document):
+            canvas.saveState()
+            canvas.setFont(font_name, 8)
+            canvas.setFillColor(colors.HexColor("#8b682b"))
+            canvas.drawCentredString(
+                A4[0] / 2, 10 * mm,
+                f"TAWFIQ AUTO PRO  |  {document.page}"
+            )
+            canvas.restoreState()
+
+        doc.build(
+            story,
+            onFirstPage=page_footer,
+            onLaterPages=page_footer,
+        )
         pdf = buffer.getvalue()
         buffer.close()
 
@@ -1475,19 +1748,27 @@ async def account_download_pdf(request: Request):
             content=pdf,
             media_type="application/pdf",
             headers={
-                "Content-Disposition": 'attachment; filename="tawfiq-profile.pdf"',
+                "Content-Disposition":
+                    'attachment; filename="tawfiq-full-account-report.pdf"',
                 "Cache-Control": "private, no-store",
                 "X-Content-Type-Options": "nosniff",
             },
         )
+
     except Exception:
+        logging.exception(
+            "PDF report generation failed for account id=%s",
+            user["id"],
+        )
         return HTMLResponse(
-            page("خطای ساخت PDF",
-                 "<p>ساخت PDF موفق نشد. نصب بودن کتابخانه‌های PDF و فونت فارسی را بررسی کن.</p>"
-                 "<a href='/account'>بازگشت به پروفایل</a>", user),
+            page(
+                "خطای ساخت PDF",
+                "<p>ساخت گزارش PDF موفق نشد. جزئیات خطا در گزارش سرور ثبت شد.</p>"
+                "<a href='/account'>بازگشت به پروفایل</a>",
+                user,
+            ),
             status_code=500,
         )
-
 
 @app.get("/notifications", response_class=HTMLResponse)
 async def notifications_page(request: Request):
