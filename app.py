@@ -189,45 +189,6 @@ def get_currency_rates():
 def currency_options():
     return "".join(f'<option value="{c}">{c} — {n}</option>' for c, (n, _) in CURRENCIES.items())
 
-@app.get("/owner/currencies", response_class=HTMLResponse)
-async def owner_currencies_page(request: Request):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    if user["role"] != "owner":
-        return HTMLResponse(page("دسترسی ممنوع", "<p>فقط مالک اجازه دارد.</p>", user), status_code=403)
-    rates = get_currency_rates()
-    rows = "".join(
-        f'<tr><td>{c}</td><td>{n}</td><td><input name="{c}" type="number" min="0.00000001" step="any" value="{rates.get(c, rate)}" required></td></tr>'
-        for c, (n, rate) in CURRENCIES.items()
-    )
-    body = f"""<div class="card"><h2>مدیریت نرخ ارز</h2>
-    <p>نرخ هر واحد ارز به افغانی است. نرخ‌های اولیه نمونه‌اند؛ پیش از استفاده اصلاح‌شان کن.</p>
-    <form method="post" action="/owner/currencies"><table>
-    <tr><th>کد</th><th>ارز</th><th>معادل افغانی</th></tr>{rows}</table>
-    <button type="submit">ذخیره نرخ‌ها</button></form>
-    <p><a href="/owner">بازگشت به پنل مالک</a></p></div>"""
-    return HTMLResponse(page("مدیریت نرخ ارز", body, user))
-
-@app.post("/owner/currencies")
-async def owner_currencies_save(request: Request):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=303)
-    if user["role"] != "owner":
-        return HTMLResponse(page("دسترسی ممنوع", "<p>فقط مالک اجازه دارد.</p>", user), status_code=403)
-    form = await request.form()
-    try:
-        values = {c: float(form.get(c, "")) for c in CURRENCIES}
-        if any(not (0 < v < 1e12) for v in values.values()):
-            raise ValueError()
-    except (ValueError, TypeError):
-        return HTMLResponse(page("خطا", "<p>نرخ‌ها باید عدد مثبت باشند.</p>", user), status_code=400)
-    ensure_currency_tables()
-    with get_db() as conn:
-        for c, rate in values.items():
-            conn.execute("UPDATE currency_rates SET rate_to_afn=?, updated_at=CURRENT_TIMESTAMP WHERE currency=?", (rate, c))
-    return RedirectResponse("/owner/currencies", status_code=303)
 
 
 def init_db():
@@ -723,6 +684,47 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+@app.get("/owner/currencies", response_class=HTMLResponse)
+async def owner_currencies_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    if user["role"] != "owner":
+        return HTMLResponse(page("دسترسی ممنوع", "<p>فقط مالک اجازه دارد.</p>", user), status_code=403)
+    rates = get_currency_rates()
+    rows = "".join(
+        f'<tr><td>{c}</td><td>{n}</td><td><input name="{c}" type="number" min="0.00000001" step="any" value="{rates.get(c, rate)}" required></td></tr>'
+        for c, (n, rate) in CURRENCIES.items()
+    )
+    body = f"""<div class="card"><h2>مدیریت نرخ ارز</h2>
+    <p>نرخ هر واحد ارز به افغانی است. نرخ‌های اولیه نمونه‌اند؛ پیش از استفاده اصلاح‌شان کن.</p>
+    <form method="post" action="/owner/currencies"><table>
+    <tr><th>کد</th><th>ارز</th><th>معادل افغانی</th></tr>{rows}</table>
+    <button type="submit">ذخیره نرخ‌ها</button></form>
+    <p><a href="/owner">بازگشت به پنل مالک</a></p></div>"""
+    return HTMLResponse(page("مدیریت نرخ ارز", body, user))
+
+@app.post("/owner/currencies")
+async def owner_currencies_save(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    if user["role"] != "owner":
+        return HTMLResponse(page("دسترسی ممنوع", "<p>فقط مالک اجازه دارد.</p>", user), status_code=403)
+    form = await request.form()
+    try:
+        values = {c: float(form.get(c, "")) for c in CURRENCIES}
+        if any(not (0 < v < 1e12) for v in values.values()):
+            raise ValueError()
+    except (ValueError, TypeError):
+        return HTMLResponse(page("خطا", "<p>نرخ‌ها باید عدد مثبت باشند.</p>", user), status_code=400)
+    ensure_currency_tables()
+    with get_db() as conn:
+        for c, rate in values.items():
+            conn.execute("UPDATE currency_rates SET rate_to_afn=?, updated_at=CURRENT_TIMESTAMP WHERE currency=?", (rate, c))
+    return RedirectResponse("/owner/currencies", status_code=303)
+
 
 # Put a unique SESSION_SECRET in .env before deployment.
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")
