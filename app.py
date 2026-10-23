@@ -658,7 +658,7 @@ body.theme-owner .app-header {{background:rgba(7,7,7,.91);}}
 <body class="{page_theme}">
 <header class="app-header">
   <div class="header-row">
-    <a class="brand" href="/dashboard">TAWFIQ <span>AUTO PRO</span></a>
+    <a class="brand" href="/dashboard">TAWFIQ AND AHMAD AUTO PRO</a>
     {profile}
   </div>
   {nav}
