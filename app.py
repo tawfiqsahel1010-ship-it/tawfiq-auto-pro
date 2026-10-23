@@ -1021,8 +1021,8 @@ async def vehicles_page(request: Request):
             <div class="vehicle-specs">
               <div><small>سال ساخت</small><strong>{year}</strong></div>
               <div><small>رنگ</small><strong>{color}</strong></div>
-              <div><small>قیمت خرید</small><strong>{money(v['purchase_price'] or 0)} افغانی</strong></div>
-              <div><small>قیمت فروش</small><strong>{money(v['sale_price'] or 0)} افغانی</strong></div>
+              <div><small>قیمت خرید</small><strong>{money(v['purchase_price'] or 0)} {esc(v['purchase_currency'] if 'purchase_currency' in v.keys() else 'AFN')}</strong></div>
+              <div><small>قیمت فروش</small><strong>{money(v['sale_price'] or 0)} {esc(v['sale_currency'] if 'sale_currency' in v.keys() else 'AFN')}</strong></div>
             </div>
             <details class="vehicle-details">
               <summary>مشاهده مشخصات کامل</summary>
