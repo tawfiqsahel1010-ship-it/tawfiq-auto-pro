@@ -145,7 +145,7 @@ def get_db():
         host=parsed.hostname,
         port=parsed.port or 5432,
         database=unquote(parsed.path.lstrip("/")) or "postgres",
-        ssl_context=ssl.create_default_context(cafile=certifi.where()),
+        ssl_context=ssl.create_default_context(cafile=os.path.join(os.path.dirname(os.path.abspath(__file__)), "supabase-ca.crt")),
         timeout=20,
     )
     return PostgresConnection(connection)
@@ -517,7 +517,7 @@ def page(title, body, user=None, message=""):
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#080808">
-<title>{esc(title)} | TAWFIQ AUTO PRO</title>
+<title>{esc(title)} | TAWFIQ AND AHMAD AUTO PRO</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;600;700&family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -576,7 +576,7 @@ body .container .card h2{{border-bottom:1px solid rgba(213,179,106,.15);padding-
 @media(max-width:600px){{.app-hero{{min-height:220px;padding:20px;background-position:58% center}}.app-hero h2{{font-size:26px}}}}
 
 
-/* TAWFIQ AUTO PRO - individual luxury panel themes */
+/* TAWFIQ AND AHMAD AUTO PRO - individual luxury panel themes */
 body.theme-dashboard {{
   background: linear-gradient(135deg,rgba(4,4,4,.84),rgba(8,8,8,.95)),
   url("https://images.unsplash.com/photo-1503376780353-7e6692767b70?auto=format&fit=crop&w=2000&q=85") center/cover fixed;
@@ -669,7 +669,7 @@ body.theme-owner .app-header {{background:rgba(7,7,7,.91);}}
   {f'<p class="small">خوش آمدی، {username}</p>' if user else ''}
   {body}
 </main>
-<footer>TAWFIQ AUTO PRO · مدیریت موترها و حسابداری خصوصی · © 2026</footer>
+<footer>TAWFIQ AND AHMAD AUTO PRO · مدیریت موترها و حسابداری خصوصی · © 2026</footer>
 </body>
 </html>"""
 
@@ -680,7 +680,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="TAWFIQ AUTO PRO",
+    title="TAWFIQ AND AHMAD AUTO PRO",
     description="Vehicle registration and accounting system",
     version="2.0.0",
     lifespan=lifespan,
@@ -782,7 +782,7 @@ async def home(request: Request):
     try:
         return templates.TemplateResponse(
             request=request, name="index.html",
-            context={"brand": "TAWFIQ AUTO PRO"}
+            context={"brand": "TAWFIQ AND AHMAD AUTO PRO"}
         )
     except Exception:
         body = """
@@ -950,7 +950,7 @@ async def dashboard(request: Request):
     body = f"""
     <section class="app-hero">
       <div class="app-hero-content">
-        <div class="eyebrow">TAWFIQ AUTO PRO · PRIVATE GARAGE</div>
+        <div class="eyebrow">TAWFIQ AND AHMAD AUTO PRO · PRIVATE GARAGE</div>
         <h2>قدرت، ظرافت و مدیریت دقیق.</h2>
         <p>موترهای خود را مدیریت کن و عواید و مصارف را از یک داشبورد اختصاصی بررسی کن.</p>
         <a class="btn" href="/vehicles">🚘 مدیریت موترهای من ↗</a>
@@ -1045,7 +1045,7 @@ async def vehicles_page(request: Request):
     body = f"""
     <section class="panel-banner banner-vehicles">
       <div class="panel-banner-content">
-        <div class="eyebrow">TAWFIQ AUTO PRO · PRIVATE GARAGE</div>
+        <div class="eyebrow">TAWFIQ AND AHMAD AUTO PRO · PRIVATE GARAGE</div>
         <h2>گاراژ اختصاصی موترهای تو</h2>
         <p>موترهای ثبت‌شده‌ات را در یک فضای لوکس و منظم مدیریت کن.</p>
       </div>
@@ -1420,7 +1420,7 @@ async def vehicle_expenses_page(request: Request, vehicle_id: int):
 
     body = f"""
     <div class="card">
-      <div class="eyebrow">TAWFIQ AUTO PRO · EXPENSES</div>
+      <div class="eyebrow">TAWFIQ AND AHMAD AUTO PRO · EXPENSES</div>
       <h2>مدیریت مصارف: {title}</h2>
       <p>نمبر پلیت: {plate}</p>
       <div class="grid">
@@ -1719,7 +1719,7 @@ async def account_download_svg(request: Request):
  </linearGradient><linearGradient id="gold"><stop stop-color="#b28b43"/><stop offset="0.5" stop-color="#f3dfaa"/><stop offset="1" stop-color="#c4a052"/></linearGradient></defs>
  <rect width="1200" height="760" rx="32" fill="url(#bg)"/>
  <rect x="24" y="24" width="1152" height="712" rx="24" fill="none" stroke="url(#gold)" stroke-width="3"/>
- <text x="600" y="120" fill="#f3dfaa" font-family="sans-serif" font-size="43" font-weight="bold" text-anchor="middle">TAWFIQ AUTO PRO</text>
+ <text x="600" y="120" fill="#f3dfaa" font-family="sans-serif" font-size="43" font-weight="bold" text-anchor="middle">TAWFIQ AND AHMAD AUTO PRO</text>
  <text x="600" y="175" fill="#d5b36a" font-family="sans-serif" font-size="28" text-anchor="middle">PRIVATE ACCOUNT PROFILE</text>
  <line x1="130" y1="220" x2="1070" y2="220" stroke="#d5b36a" stroke-opacity=".6"/>
  <g fill="#f5f1e8" font-family="Noto Naskh Arabic, sans-serif" font-size="32" direction="rtl" text-anchor="end">
@@ -1728,7 +1728,7 @@ async def account_download_svg(request: Request):
  <text x="1020" y="470">نقش حساب: {role}</text>
  <text x="1020" y="550">شناسه داخلی: {user_id}</text>
  </g>
- <text x="600" y="665" fill="#d5b36a" font-family="sans-serif" font-size="22" text-anchor="middle">PRIVATE PROFILE · TAWFIQ AUTO PRO</text>
+ <text x="600" y="665" fill="#d5b36a" font-family="sans-serif" font-size="22" text-anchor="middle">PRIVATE PROFILE · TAWFIQ AND AHMAD AUTO PRO</text>
 </svg>"""
 
     return Response(
@@ -1917,12 +1917,12 @@ async def account_download_pdf(request: Request):
             leftMargin=20 * mm,
             topMargin=20 * mm,
             bottomMargin=20 * mm,
-            title="TAWFIQ AUTO PRO - Full Account Report",
-            author="TAWFIQ AUTO PRO",
+            title="TAWFIQ AND AHMAD AUTO PRO - Full Account Report",
+            author="TAWFIQ AND AHMAD AUTO PRO",
         )
 
         story = [
-            P("TAWFIQ AUTO PRO", title_style),
+            P("TAWFIQ AND AHMAD AUTO PRO", title_style),
             P("گزارش کامل حساب، موترها و حسابداری", heading_style),
             P("تاریخ تهیه گزارش: " + datetime.now().strftime("%Y-%m-%d %H:%M")),
             Spacer(1, 4 * mm),
@@ -2094,7 +2094,7 @@ async def account_download_pdf(request: Request):
         story.extend([
             Spacer(1, 10 * mm),
             P("این گزارش خصوصی و مربوط به حساب واردشده است.", small_style),
-            P("TAWFIQ AUTO PRO · PRIVATE ACCOUNTING REPORT", small_style),
+            P("TAWFIQ AND AHMAD AUTO PRO · PRIVATE ACCOUNTING REPORT", small_style),
         ])
 
         def page_footer(canvas, document):
@@ -2103,7 +2103,7 @@ async def account_download_pdf(request: Request):
             canvas.setFillColor(colors.HexColor("#8b682b"))
             canvas.drawCentredString(
                 A4[0] / 2, 10 * mm,
-                f"TAWFIQ AUTO PRO  |  {document.page}"
+                f"TAWFIQ AND AHMAD AUTO PRO  |  {document.page}"
             )
             canvas.restoreState()
 
@@ -2257,7 +2257,7 @@ async def owner_toggle_user(request: Request, target_id: int):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "project": "TAWFIQ AUTO PRO"}
+    return {"status": "ok", "project": "TAWFIQ AND AHMAD AUTO PRO"}
 
 
 @app.get("/api/database")
