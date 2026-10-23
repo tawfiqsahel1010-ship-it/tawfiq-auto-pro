@@ -915,63 +915,144 @@ async def dashboard(request: Request):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=303)
+
+    uid = user["id"]
+
     with get_db() as conn:
         vehicles = conn.execute(
-            "SELECT COUNT(*) n FROM vehicles WHERE user_id=?", (user["id"],)
+            "SELECT COUNT(*) n FROM vehicles WHERE user_id=?", (uid,)
         ).fetchone()["n"]
-        totals = conn.execute(
-            """SELECT
-               COALESCE(SUM(CASE WHEN transaction_type='income' THEN amount ELSE 0 END),0) income,
-               COALESCE(SUM(CASE WHEN transaction_type='expense' THEN amount ELSE 0 END),0) expense
-               FROM transactions WHERE user_id=?""", (user["id"],)
-        ).fetchone()
-        vehicle_totals = conn.execute(
-            """SELECT
-                 COALESCE(SUM(v.purchase_price),0) purchase_total,
-                 COALESCE(SUM(v.sale_price),0) sale_total,
-                 COALESCE(SUM((SELECT SUM(e.amount) FROM vehicle_expenses e
-                    WHERE e.vehicle_id=v.id AND e.user_id=v.user_id)),0) vehicle_expenses
-               FROM vehicles v WHERE v.user_id=?""",
-            (user["id"],)
-        ).fetchone()
+
+        transactions = conn.execute(
+            """SELECT COALESCE(currency, 'AFN') currency,
+                      transaction_type, COALESCE(SUM(amount), 0) total
+               FROM transactions WHERE user_id=?
+               GROUP BY COALESCE(currency, 'AFN'), transaction_type
+               ORDER BY COALESCE(currency, 'AFN'), transaction_type""",
+            (uid,)
+        ).fetchall()
+
+        purchases = conn.execute(
+            """SELECT COALESCE(purchase_currency, 'AFN') currency,
+                      COALESCE(SUM(purchase_price), 0) total
+               FROM vehicles WHERE user_id=?
+               GROUP BY COALESCE(purchase_currency, 'AFN')
+               ORDER BY COALESCE(purchase_currency, 'AFN')""",
+            (uid,)
+        ).fetchall()
+
+        sales = conn.execute(
+            """SELECT COALESCE(sale_currency, 'AFN') currency,
+                      COALESCE(SUM(sale_price), 0) total
+               FROM vehicles WHERE user_id=?
+               GROUP BY COALESCE(sale_currency, 'AFN')
+               ORDER BY COALESCE(sale_currency, 'AFN')""",
+            (uid,)
+        ).fetchall()
+
+        direct_expenses = conn.execute(
+            """SELECT COALESCE(currency, 'AFN') currency,
+                      COALESCE(SUM(amount), 0) total
+               FROM vehicle_expenses WHERE user_id=?
+               GROUP BY COALESCE(currency, 'AFN')
+               ORDER BY COALESCE(currency, 'AFN')""",
+            (uid,)
+        ).fetchall()
+
         recent = conn.execute(
             """SELECT * FROM transactions WHERE user_id=?
                ORDER BY transaction_date DESC, id DESC LIMIT 5""",
-            (user["id"],)
+            (uid,)
         ).fetchall()
+
         unread = conn.execute(
             "SELECT COUNT(*) n FROM notifications WHERE user_id IS NULL OR user_id=?",
-            (user["id"],)
+            (uid,)
         ).fetchone()["n"]
+
+    income = {}
+    expense = {}
+    for r in transactions:
+        code = str(r["currency"] or "AFN")
+        if r["transaction_type"] == "income":
+            income[code] = float(r["total"] or 0)
+        else:
+            expense[code] = float(r["total"] or 0)
+
+    def cards(items, empty_text):
+        if not items:
+            return f'<div class="card"><p>{esc(empty_text)}</p></div>'
+        return "".join(
+            f'<div class="card"><div>{esc(r["currency"] or "AFN")}</div>'
+            f'<div class="stat">{money(r["total"])}</div></div>'
+            for r in items
+        )
+
+    income_html = cards(
+        [{"currency": c, "total": income[c]} for c in sorted(income)],
+        "هنوز عوایدی ثبت نشده است."
+    )
+    expense_html = cards(
+        [{"currency": c, "total": expense[c]} for c in sorted(expense)],
+        "هنوز مصرفی ثبت نشده است."
+    )
+    balance_html = cards(
+        [{"currency": c, "total": income.get(c, 0) - expense.get(c, 0)}
+         for c in sorted(set(income) | set(expense))],
+        "هنوز معامله‌ای ثبت نشده است."
+    )
+    purchase_html = cards(purchases, "قیمت خریدی ثبت نشده است.")
+    sale_html = cards(sales, "قیمت فروشی ثبت نشده است.")
+    direct_html = cards(direct_expenses, "مصارف مستقیم موترها ثبت نشده است.")
+
     rows = "".join(
-        f"<tr><td>{esc(r['transaction_date'])}</td><td>{'عواید' if r['transaction_type']=='income' else 'مصارف'}</td><td>{esc(r['category'])}</td><td>{money(r['amount'])} افغانی</td></tr>"
+        f"<tr><td>{esc(r['transaction_date'])}</td>"
+        f"<td>{'عواید' if r['transaction_type'] == 'income' else 'مصارف'}</td>"
+        f"<td>{esc(r['category'])}</td>"
+        f"<td>{money(r['amount'])} {esc(r['currency'] or 'AFN')}</td></tr>"
         for r in recent
-    ) or "<tr><td colspan='4'>هنوز معامله‌ای ثبت نشده است.</td></tr>"
+    ) or '<tr><td colspan="4">هنوز معامله‌ای ثبت نشده است.</td></tr>'
+
     body = f"""
     <section class="app-hero">
       <div class="app-hero-content">
         <div class="eyebrow">TAWFIQ AND AHMAD AUTO PRO · PRIVATE GARAGE</div>
         <h2>قدرت، ظرافت و مدیریت دقیق.</h2>
-        <p>موترهای خود را مدیریت کن و عواید و مصارف را از یک داشبورد اختصاصی بررسی کن.</p>
+        <p>موترهای خود را مدیریت کن و عواید و مصارف را بررسی کن.</p>
         <a class="btn" href="/vehicles">🚘 مدیریت موترهای من ↗</a>
       </div>
     </section>
     <div class="grid">
-      <div class="card"><div>تعداد موترها</div><div class="stat">{vehicles}</div><a href="/vehicles">مدیریت موترها ←</a></div>
-      <div class="card"><div>مجموع عواید</div><div class="stat">{money(totals['income'])}</div><div>افغانی</div></div>
-      <div class="card"><div>مجموع مصارف</div><div class="stat">{money(totals['expense'])}</div><div>افغانی</div></div>
-      <div class="card"><div>بیلانس معاملات</div><div class="stat">{money(totals['income']-totals['expense'])}</div><div>افغانی</div></div>
-      <div class="card"><div>مجموع قیمت خرید موترها</div><div class="stat">{money(vehicle_totals['purchase_total'])}</div><div>افغانی</div></div>
-      <div class="card"><div>مجموع قیمت فروش ثبت‌شده</div><div class="stat">{money(vehicle_totals['sale_total'])}</div><div>افغانی</div></div>
-      <div class="card"><div>مصارف مستقیم موترها</div><div class="stat">{money(vehicle_totals['vehicle_expenses'])}</div><div>افغانی</div></div>
+      <div class="card"><div>تعداد موترها</div>
+      <div class="stat">{vehicles}</div>
+      <a href="/vehicles">مدیریت موترها ←</a></div>
     </div>
+    <div class="card"><h2>💰 مجموع عواید معاملات</h2>
+      <div class="grid">{income_html}</div></div>
+    <div class="card"><h2>💸 مجموع مصارف معاملات</h2>
+      <div class="grid">{expense_html}</div></div>
+    <div class="card"><h2>📊 بیلانس معاملات به تفکیک ارز</h2>
+      <p>عواید منهای مصارف، جداگانه برای هر ارز.</p>
+      <div class="grid">{balance_html}</div></div>
+    <div class="card"><h2>🚘 مجموع قیمت خرید موترها</h2>
+      <div class="grid">{purchase_html}</div></div>
+    <div class="card"><h2>🚗 مجموع قیمت فروش موترها</h2>
+      <div class="grid">{sale_html}</div></div>
+    <div class="card"><h2>🔧 مصارف مستقیم موترها</h2>
+      <div class="grid">{direct_html}</div></div>
     <div class="grid">
       <a class="card" href="/vehicles"><h3>🚘 موترهای من</h3><p>ثبت و مدیریت موترها</p></a>
       <a class="card" href="/transactions"><h3>📊 حسابداری</h3><p>ثبت عواید و مصارف</p></a>
       <a class="card" href="/notifications"><h3>🔔 اعلان‌ها ({unread})</h3><p>پیام‌های سیستم و مالک</p></a>
       <a class="card" href="/account"><h3>👤 حساب کاربری</h3><p>مشاهده مشخصات حساب</p></a>
     </div>
-    <div class="card"><h2>آخرین معاملات</h2><table><tr><th>تاریخ</th><th>نوع</th><th>دسته</th><th>مبلغ</th></tr>{rows}</table><p><a class="btn" href="/transactions">مشاهده همه معاملات</a></p></div>
+    <div class="card"><h2>آخرین معاملات</h2>
+      <div style="overflow-x:auto"><table>
+      <tr><th>تاریخ</th><th>نوع</th><th>دسته</th><th>مبلغ و ارز</th></tr>
+      {rows}
+      </table></div>
+      <p><a class="btn" href="/transactions">مشاهده همه معاملات</a></p>
+    </div>
     """
     return HTMLResponse(page("داشبورد من", body, user))
 
