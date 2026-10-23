@@ -132,6 +132,7 @@ def get_db():
 
     from urllib.parse import urlparse, unquote
     import ssl
+    import certifi
     import pg8000.dbapi
 
     parsed = urlparse(DATABASE_URL)
@@ -144,7 +145,7 @@ def get_db():
         host=parsed.hostname,
         port=parsed.port or 5432,
         database=unquote(parsed.path.lstrip("/")) or "postgres",
-        ssl_context=ssl.create_default_context(),
+        ssl_context=ssl.create_default_context(cafile=certifi.where()),
         timeout=20,
     )
     return PostgresConnection(connection)

@@ -25,3 +25,4 @@ reportlab
 arabic-reshaper
 python-bidi
 pg8000
+certifi
