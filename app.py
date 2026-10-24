@@ -1759,6 +1759,11 @@ async def account_page(request: Request):
     if not user:
         return RedirectResponse("/login", status_code=303)
 
+    delete_button = (
+        ""
+        if user["role"] == "owner"
+        else '<a class="btn" href="/account/delete">حذف حساب کاربری</a>'
+    )
     body = f"""
     <section class="panel-banner banner-account">
       <div class="panel-banner-content">
@@ -1773,12 +1778,337 @@ async def account_page(request: Request):
       <p><b>نقش:</b> {'مالک سیستم' if user['role']=='owner' else 'کاربر'}</p>
       <p><b>شناسه داخلی:</b> {user['id']}</p>
       <p class="small">رمز عبور به شکل هش‌شده ذخیره می‌شود و در فایل‌های دانلودی درج نمی‌شود.</p>
+      {delete_button}
       <a class="btn" href="/account/download.pdf">دانلود پروفایل PDF</a>
-      <a class="btn" href="/account/download.svg">دانلود پروفایل تصویری SVG</a>
+      <a class="btn" href="/account/download.png">دانلود پروفایل تصویری PNG</a>
       <a class="btn" href="/dashboard">بازگشت به داشبورد</a>
     </div>
     """
     return HTMLResponse(page("حساب کاربری", body, user))
+
+
+
+@app.get("/account/delete", response_class=HTMLResponse)
+async def account_delete_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    if user["role"] == "owner":
+        return HTMLResponse(
+            page("حذف حساب", """
+            <div class="card">
+              <h2>حذف حساب مالک</h2>
+              <p>حساب مالک اصلی از این صفحه قابل حذف نیست تا سیستم به‌طور تصادفی قفل نشود.</p>
+              <a class="btn" href="/account">بازگشت به پروفایل</a>
+            </div>
+            """, user),
+            status_code=403,
+        )
+
+    body = """
+    <div class="card">
+      <h2>حذف حساب کاربری</h2>
+      <p>آیا مطمئن هستید که می‌خواهید حساب خود را حذف کنید؟</p>
+      <p>این کار اطلاعات مرتبط با حساب را حذف می‌کند و برگشت‌دادن آن ممکن است ممکن نباشد.</p>
+      <form method="post" action="/account/delete/confirm">
+        <button class="btn" type="submit" name="answer" value="yes">
+          بله، ادامه می‌دهم
+        </button>
+        <a class="btn" href="/account">خیر، انصراف</a>
+      </form>
+    </div>
+    """
+    return HTMLResponse(page("تأیید حذف حساب", body, user))
+
+
+@app.post("/account/delete/confirm", response_class=HTMLResponse)
+async def account_delete_confirm(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    if user["role"] == "owner":
+        return HTMLResponse("حساب مالک اصلی قابل حذف نیست.", status_code=403)
+
+    form = await request.form()
+    if form.get("answer") != "yes":
+        return RedirectResponse("/account", status_code=303)
+
+    body = """
+    <div class="card">
+      <h2>تأیید هویت برای حذف حساب</h2>
+      <p>برای جلوگیری از حذف حساب توسط شخص دیگر، نام کاربری و رمز عبور فعلی خود را وارد کنید.</p>
+      <form method="post" action="/account/delete/execute">
+        <label>نام کاربری</label>
+        <input type="text" name="username" autocomplete="username" required>
+        <label>رمز عبور فعلی</label>
+        <input type="password" name="password" autocomplete="current-password" required>
+        <button class="btn" type="submit">تأیید و حذف دائمی حساب</button>
+        <a class="btn" href="/account">انصراف</a>
+      </form>
+    </div>
+    """
+    return HTMLResponse(page("تأیید هویت", body, user))
+
+
+@app.post("/account/delete/execute", response_class=HTMLResponse)
+async def account_delete_execute(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    if user["role"] == "owner":
+        return HTMLResponse("حساب مالک اصلی قابل حذف نیست.", status_code=403)
+
+    form = await request.form()
+    username = str(form.get("username", "")).strip()
+    password = str(form.get("password", ""))
+
+    if username.casefold() != str(user["username"]).casefold():
+        return HTMLResponse(
+            page("تأیید ناموفق", """
+            <div class="card">
+              <h2>اطلاعات صحیح نیست</h2>
+              <p>نام کاربری یا رمز عبور نادرست است. حساب حذف نشد.</p>
+              <a class="btn" href="/account/delete">تلاش دوباره</a>
+              <a class="btn" href="/account">بازگشت</a>
+            </div>
+            """, user),
+            status_code=400,
+        )
+
+    conn = None
+    try:
+        conn = get_db()
+        row = conn.execute(
+            "SELECT id, username, password_hash, role FROM users WHERE id = ?",
+            (user["id"],),
+        ).fetchone()
+
+        if (
+            not row
+            or row["role"] == "owner"
+            or str(row["username"]).casefold() != username.casefold()
+            or not verify_password(password, row["password_hash"])
+        ):
+            return HTMLResponse(
+                page("تأیید ناموفق", """
+                <div class="card">
+                  <h2>اطلاعات صحیح نیست</h2>
+                  <p>نام کاربری یا رمز عبور نادرست است. حساب حذف نشد.</p>
+                  <a class="btn" href="/account/delete">تلاش دوباره</a>
+                  <a class="btn" href="/account">بازگشت</a>
+                </div>
+                """, user),
+                status_code=400,
+            )
+
+        # حذف سوابق حساب و اطلاعات وابسته در همان تراکنش.
+        conn.execute("DELETE FROM audit_logs WHERE user_id = ?", (user["id"],))
+        result = conn.execute(
+            "DELETE FROM users WHERE id = ? AND role = 'user'",
+            (user["id"],),
+        )
+
+        if getattr(result, "rowcount", 1) == 0:
+            raise RuntimeError("حساب حذف نشد؛ عملیات متوقف شد.")
+
+        conn.commit()
+
+    except Exception:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+
+        logging.exception("Account deletion failed")
+        return HTMLResponse(
+            page("خطا", """
+            <div class="card">
+              <h2>حذف حساب انجام نشد</h2>
+              <p>به دلیل خطای دیتابیس، عملیات تکمیل نشد. لطفاً بعداً دوباره تلاش کنید.</p>
+              <a class="btn" href="/account">بازگشت به پروفایل</a>
+            </div>
+            """, user),
+            status_code=500,
+        )
+
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    request.session.clear()
+    return HTMLResponse("""
+    <!doctype html>
+    <html lang="fa" dir="rtl">
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <title>حساب حذف شد</title>
+      <body>
+        <main>
+          <h2>حساب کاربری حذف شد</h2>
+          <p>حذف حساب انجام شد. برای استفاده دوباره، می‌توانید حساب جدید بسازید.</p>
+          <a href="/register">ثبت‌نام دوباره</a>
+          <a href="/login">ورود</a>
+        </main>
+      </body>
+    </html>
+    """)
+
+
+@app.get("/account/download.png")
+async def account_download_png(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+
+    import io
+    from PIL import Image, ImageDraw, ImageFont
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+
+    uid = user["id"]
+
+    # Only this user's private records are included.
+    with get_db() as conn:
+        vehicle_rows = conn.execute(
+            """SELECT COALESCE(purchase_currency, 'AFN') currency,
+                      COALESCE(SUM(purchase_price), 0) total
+               FROM vehicles WHERE user_id=?
+               GROUP BY COALESCE(purchase_currency, 'AFN')""", (uid,)
+        ).fetchall()
+        sale_rows = conn.execute(
+            """SELECT COALESCE(sale_currency, 'AFN') currency,
+                      COALESCE(SUM(sale_price), 0) total
+               FROM vehicles WHERE user_id=?
+               GROUP BY COALESCE(sale_currency, 'AFN')""", (uid,)
+        ).fetchall()
+        vehicle_count = conn.execute(
+            "SELECT COUNT(*) n FROM vehicles WHERE user_id=?", (uid,)
+        ).fetchone()["n"]
+        sold_count = conn.execute(
+            "SELECT COUNT(*) n FROM vehicles WHERE user_id=? AND sale_price>0",
+            (uid,)
+        ).fetchone()["n"]
+        expense_rows = conn.execute(
+            """SELECT COALESCE(currency, 'AFN') currency,
+                      COALESCE(SUM(amount), 0) total
+               FROM vehicle_expenses WHERE user_id=?
+               GROUP BY COALESCE(currency, 'AFN')""", (uid,)
+        ).fetchall()
+        tx_rows = conn.execute(
+            """SELECT COALESCE(currency, 'AFN') currency, transaction_type,
+                      COALESCE(SUM(amount), 0) total
+               FROM transactions WHERE user_id=?
+               GROUP BY COALESCE(currency, 'AFN'), transaction_type""", (uid,)
+        ).fetchall()
+
+    width, height = 1400, 1500
+    image = Image.new("RGB", (width, height), "#101010")
+    draw = ImageDraw.Draw(image)
+    gold, pale, white, muted = "#d5b36a", "#f3dfaa", "#f5f1e8", "#c8c0af"
+    for y in range(height):
+        t = y / height
+        draw.line((0, y, width, y),
+                  fill=(int(12+14*t), int(11+10*t), int(9+5*t)))
+    draw.rounded_rectangle((28, 28, width-28, height-28),
+                           radius=32, outline=gold, width=5)
+    draw.rounded_rectangle((55, 55, width-55, 240),
+                           radius=25, fill="#191713", outline="#8e713a", width=2)
+
+    font_path = BASE_DIR / "assets" / "fonts" / "NotoNaskhArabic-Regular.ttf"
+    if not font_path.is_file():
+        raise FileNotFoundError("Project Persian font is missing.")
+    title_font = ImageFont.truetype(str(font_path), 48)
+    section_font = ImageFont.truetype(str(font_path), 34)
+    detail_font = ImageFont.truetype(str(font_path), 30)
+    small_font = ImageFont.truetype(str(font_path), 23)
+
+    def rtl(value):
+        return get_display(arabic_reshaper.reshape(str(value or "")))
+
+    def centered(text, y, font, fill):
+        box = draw.textbbox((0, 0), text, font=font)
+        draw.text(((width-(box[2]-box[0]))/2, y), text, font=font, fill=fill)
+
+    def money_groups(rows):
+        return "، ".join(
+            f'{float(r["total"] or 0):,.2f} {r["currency"]}'
+            for r in rows
+        ) or "۰"
+
+    def tx_groups(rows, kind):
+        return "، ".join(
+            f'{float(r["total"] or 0):,.2f} {r["currency"]}'
+            for r in rows if r["transaction_type"] == kind
+        ) or "۰"
+
+    centered("TAWFIQ AND AHMAD AUTO PRO", 82, title_font, pale)
+    centered(rtl("کارت اختصاصی حساب کاربری"), 157, section_font, gold)
+
+    draw.rounded_rectangle((75, 275, 1325, 600),
+                           radius=24, fill="#191919", outline="#66532f", width=2)
+    draw.text((1270, 300), rtl("مشخصات حساب"), font=section_font, fill=gold, anchor="ra")
+    profile = [
+        ("نام کامل", user["full_name"]),
+        ("نام کاربری", user["username"]),
+        ("نقش حساب", "مالک سیستم" if user["role"] == "owner" else "کاربر"),
+        ("شناسه حساب", user["id"]),
+    ]
+    y = 360
+    for label, value in profile:
+        draw.text((1260, y), rtl(f"{label}: {value}"),
+                  font=detail_font, fill=white, anchor="ra")
+        y += 55
+
+    draw.rounded_rectangle((75, 630, 1325, 900),
+                           radius=24, fill="#191919", outline="#66532f", width=2)
+    draw.text((1270, 655), rtl("گزارش موترها"), font=section_font, fill=gold, anchor="ra")
+    vehicle_lines = [
+        f'تعداد کل موترها: {vehicle_count}',
+        f'موترهای دارای قیمت فروش: {sold_count}',
+        f'موترهای باقیمانده بر اساس قیمت فروش صفر: {max(0, vehicle_count-sold_count)}',
+    ]
+    y = 720
+    for line in vehicle_lines:
+        draw.text((1260, y), rtl(line), font=detail_font, fill=white, anchor="ra")
+        y += 55
+
+    draw.rounded_rectangle((75, 930, 1325, 1325),
+                           radius=24, fill="#191919", outline="#66532f", width=2)
+    draw.text((1270, 955), rtl("گزارش مالی بر اساس ارز"), font=section_font, fill=gold, anchor="ra")
+    finance = [
+        ("مجموع قیمت‌های خرید", money_groups(vehicle_rows)),
+        ("مجموع قیمت‌های فروش", money_groups(sale_rows)),
+        ("مصارف موترها", money_groups(expense_rows)),
+        ("درآمد تراکنش‌ها", tx_groups(tx_rows, "income")),
+        ("مصارف تراکنش‌ها", tx_groups(tx_rows, "expense")),
+    ]
+    y = 1020
+    for label, value in finance:
+        draw.text((1260, y), rtl(f"{label}: {value}"),
+                  font=small_font, fill=white, anchor="ra")
+        y += 55
+
+    centered(rtl("گزارش خصوصی حساب — اطلاعات فقط مربوط به همین کاربر است"), 1360, small_font, pale)
+    centered("TAWFIQ AND AHMAD AUTO PRO", 1410, small_font, gold)
+
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return Response(
+        content=output.getvalue(),
+        media_type="image/png",
+        headers={
+            "Content-Disposition": 'attachment; filename="tawfiq-profile-report.png"',
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.get("/account/download.svg")
@@ -2031,10 +2361,10 @@ async def account_download_pdf(request: Request):
         summary_rows = [
             ["عنوان", "مقدار"],
             ["تعداد موترها", str(len(vehicles))],
-            ["مجموع قیمت خرید", money(total_purchase) + " افغانی"],
-            ["مجموع قیمت فروش ثبت‌شده", money(total_sale) + " افغانی"],
-            ["مجموع مصارف مستقیم موترها",
-             money(total_vehicle_expenses) + " افغانی"],
+            ["مجموع قیمت خرید (معادل افغانی)", money(total_purchase) + " AFN"],
+            ["مجموع قیمت فروش ثبت‌شده (معادل افغانی)", money(total_sale) + " AFN"],
+            ["مجموع مصارف مستقیم موترها (معادل افغانی)",
+             money(total_vehicle_expenses) + " AFN"],
             ["سود / زیان خالص حساب",
              money(overall_profit) + " افغانی"],
         ]
@@ -2109,11 +2439,11 @@ async def account_download_pdf(request: Request):
                     ["نمبر شاسی", vehicle["chassis_number"] or "ثبت نشده"],
                     ["نمبر انجن", vehicle["engine_number"] or "ثبت نشده"],
                     ["تاریخ ثبت", vehicle["created_at"] or "ثبت نشده"],
-                    ["قیمت خرید", money(purchase) + " افغانی"],
-                    ["قیمت فروش", money(sale) + " افغانی"],
-                    ["مجموع مصارف", money(expense_total) + " افغانی"],
+                    ["قیمت خرید", money(vehicle["purchase_price"]) + " " + (vehicle["purchase_currency"] if "purchase_currency" in vehicle.keys() and vehicle["purchase_currency"] else "AFN") + "؛ معادل " + money(purchase) + " AFN"],
+                    ["قیمت فروش", money(vehicle["sale_price"]) + " " + (vehicle["sale_currency"] if "sale_currency" in vehicle.keys() and vehicle["sale_currency"] else "AFN") + "؛ معادل " + money(sale) + " AFN"],
+                    ["مجموع مصارف (معادل افغانی)", money(expense_total) + " AFN"],
                     ["سود / زیان خالص",
-                     money(profit) + " افغانی"
+                     money(profit) + " AFN (معادل افغانی)"
                      + (" (فروخته نشده)" if sale <= 0 else "")],
                 ]
                 block.append(make_table(
