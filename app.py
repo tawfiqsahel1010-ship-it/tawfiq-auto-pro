@@ -2608,6 +2608,26 @@ async def owner_page(request: Request):
       <div class="card"><div>تمام معاملات</div><div class="stat">{tx_count}</div></div>
     </div>
     <div class="card"><h2>مدیریت نرخ ارز</h2><p><a class="btn" href="/owner/currencies">تنظیم نرخ ارز</a></p></div>
+    <div class="card">
+      <h2>تنظیمات امنیتی حساب مالک</h2>
+      <p>نام کاربری و رمز عبور خود را تغییر بده.</p>
+      <form method="post" action="/owner/account-settings">
+        <label>نام کاربری جدید</label>
+        <input name="new_username" value="{esc(user['username'])}"
+               minlength="3" maxlength="40"
+               pattern="[A-Za-z0-9_.-]+" required>
+        <label>رمز عبور فعلی</label>
+        <input name="current_password" type="password"
+               autocomplete="current-password" required>
+        <label>رمز عبور جدید</label>
+        <input name="new_password" type="password"
+               minlength="10" autocomplete="new-password" required>
+        <label>تکرار رمز عبور جدید</label>
+        <input name="confirm_password" type="password"
+               minlength="10" autocomplete="new-password" required>
+        <button type="submit">ذخیره تغییرات</button>
+      </form>
+    </div>
     <div class="card"><h2>ارسال اعلان عمومی</h2>
       <form method="post" action="/owner/broadcast">
         <label>عنوان پیام</label><input name="title" required maxlength="150">
@@ -2621,6 +2641,79 @@ async def owner_page(request: Request):
     </div>
     """
     return HTMLResponse(page("پنل مالک", body, user))
+
+
+@app.post("/owner/account-settings", response_class=HTMLResponse)
+async def owner_account_settings(
+    request: Request,
+    new_username: str = Form(...),
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...)
+):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
+    if user["role"] != "owner":
+        return HTMLResponse(
+            page("دسترسی ممنوع", "<p>فقط مالک اجازه تغییر این تنظیمات را دارد.</p>", user),
+            status_code=403
+        )
+
+    username = new_username.strip().lower()
+    if (len(username) < 3 or len(username) > 40 or
+        not all(c.isalnum() or c in "_.-" for c in username)):
+        return HTMLResponse(
+            page("خطا", "<div class='card'><p>نام کاربری باید حداقل ۳ حرف داشته باشد و فقط از حروف، عدد، نقطه، خط یا زیرخط استفاده کند.</p><a href='/owner'>بازگشت</a></div>", user),
+            status_code=400
+        )
+
+    if len(new_password) < 10 or new_password != confirm_password:
+        return HTMLResponse(
+            page("خطا", "<div class='card'><p>رمز جدید باید حداقل ۱۰ حرف باشد و هر دو رمز جدید یکسان باشند.</p><a href='/owner'>بازگشت</a></div>", user),
+            status_code=400
+        )
+
+    try:
+        with get_db() as conn:
+            owner = conn.execute(
+                "SELECT id, password_hash, role FROM users WHERE id=?",
+                (user["id"],)
+            ).fetchone()
+
+            if not owner or owner["role"] != "owner":
+                return RedirectResponse("/login", status_code=303)
+
+            if not verify_password(current_password, owner["password_hash"]):
+                return HTMLResponse(
+                    page("خطا", "<div class='card'><p>رمز فعلی نادرست است. تغییرات ذخیره نشد.</p><a href='/owner'>بازگشت</a></div>", user),
+                    status_code=400
+                )
+
+            duplicate = conn.execute(
+                "SELECT id FROM users WHERE username=? AND id<>?",
+                (username, user["id"])
+            ).fetchone()
+            if duplicate:
+                return HTMLResponse(
+                    page("خطا", "<div class='card'><p>این نام کاربری قبلاً استفاده شده است.</p><a href='/owner'>بازگشت</a></div>", user),
+                    status_code=409
+                )
+
+            conn.execute(
+                "UPDATE users SET username=?, password_hash=? WHERE id=? AND role='owner'",
+                (username, hash_password(new_password), user["id"])
+            )
+
+        audit(user["id"], "owner_account_update", "Owner username/password updated")
+        request.session.clear()
+        return RedirectResponse("/login", status_code=303)
+
+    except Exception:
+        return HTMLResponse(
+            page("خطا", "<div class='card'><p>تغییرات ذخیره نشد. دوباره تلاش کن.</p><a href='/owner'>بازگشت</a></div>", user),
+            status_code=500
+        )
 
 
 @app.post("/owner/broadcast")
